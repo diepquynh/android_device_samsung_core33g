@@ -13,9 +13,9 @@ on early-init
     write /proc/sys/kernel/core_pattern /dev/null
 # radio pipe
     mkdir /dev/rpipe 0550 radio radio
-    exec -- mkfifo /dev/rpipe/ril.vt.0
-    exec -- mkfifo /dev/rpipe/ril.vt.1
-    exec -- mkfifo /dev/rpipe/ril.vt.2
+    exec -- /system/bin/mknod -m 666 /dev/rpipe/ril.vt.0 p
+    exec -- /system/bin/mknod -m 666 /dev/rpipe/ril.vt.1 p
+    exec -- /system/bin/mknod -m 666 /dev/rpipe/ril.vt.2 p
 
 on init
     mkdir /productinfo 0771 system system
@@ -63,7 +63,7 @@ on early-boot
 
     # Support audio loopback test
     mkdir /dev/pipe 0755 system system
-    exec -- mkfifo /dev/pipe/mmi.audio.ctrl
+    exec -- /system/bin/mknod -m 666 /dev/pipe/mmi.audio.ctrl p
     # Support audio parameter stored
     mkdir /data/local/media 0771 media system
 
