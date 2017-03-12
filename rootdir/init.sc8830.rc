@@ -1,6 +1,7 @@
 import /init.board.rc
 import /init.sc8830.usb.rc
-import /init.sc8830_ss.rc
+import /init.core33g_base.rc
+import /init.wifi.rc
 
 on early-init
     mount debugfs debugfs /sys/kernel/debug
@@ -12,13 +13,12 @@ on early-init
     write /proc/sys/kernel/core_pattern /dev/null
 # radio pipe
     mkdir /dev/rpipe 0550 radio radio
-    pipe 666 /dev/rpipe/ril.vt.0
-    pipe 666 /dev/rpipe/ril.vt.1
-    pipe 666 /dev/rpipe/ril.vt.2
+    exec -- mkfifo /dev/rpipe/ril.vt.0
+    exec -- mkfifo /dev/rpipe/ril.vt.1
+    exec -- mkfifo /dev/rpipe/ril.vt.2
 
 on init
     mkdir /productinfo 0771 system system
-    export LD_SHIM_LIBS /system/lib/hw/hwcomposer.sc8830.so|libmemoryheapion_sprd.so:/system/lib/hw/camera.sc8830.so|libmemoryheapion_sprd.so:/system/lib/libril.so|libril_shim.so:/system/bin/gpsd|libgps_shim.so
 
     # See storage config details at https://source.android.com/devices/storage/
 
@@ -63,7 +63,7 @@ on early-boot
 
     # Support audio loopback test
     mkdir /dev/pipe 0755 system system
-    pipe 666 /dev/pipe/mmi.audio.ctrl
+    exec -- mkfifo /dev/pipe/mmi.audio.ctrl
     # Support audio parameter stored
     mkdir /data/local/media 0771 media system
 
@@ -155,26 +155,17 @@ on charger
     start console
     start slog
 
-service poweroffalarm /system/bin/poweroff_alarm
-    disabled
-    oneshot
-
 on alarm
     class_start core
     start drm
     start media
     start console
     start slog
-    start poweroffalarm
 
 on property:ro.config.zram.support=true
     setprop sys.vm.swappiness 100
     write /proc/sys/vm/page-cluster  0
     start zram
-
-service zram /system/bin/zram.sh
-        disabled
-        oneshot
 
 on property:ro.modem.t.count=1
     write /proc/sim/0 t
@@ -205,87 +196,10 @@ on property:ro.config.ksm.support=true
     write /sys/kernel/mm/ksm/sleep_millisecs 500
     write /sys/kernel/mm/ksm/run   1
 
-service modemd /system/bin/modemd
-    class core
-    user system
-    group system radio shell
-    oneshot
-
-service phoneserver_t /system/bin/phoneserver -m t
-    class core
-    user root
-    group radio system shell dhcp
-    disabled
-    oneshot
-
-service phoneserver_w /system/bin/phoneserver -m w
-    class core
-    user root
-    group radio system shell dhcp
-    disabled
-    oneshot
-
-service phoneserver_l /system/bin/phoneserver -m l
-    class core
-    user root
-    group radio system shell dhcp
-    disabled
-    oneshot
-
-service batterysrv /bin/batterysrv
-    class core
-    user system
-    group system 
-    oneshot
-
 service charge /bin/charge
     class charger
     user root
     oneshot
-
-#nvitemd
-service nvitemd_td /system/bin/nvitemd t 0
-    class core
-    user system
-    disabled
-    group system radio shell
-    oneshot
-
-service nvitemd_w /system/bin/nvitemd w 0
-    class core
-    user system
-    group system radio shell
-    disabled
-    oneshot
-
-service nvitemd_l /system/bin/nvitemd l 0
-    class core
-    user system
-    group system radio shell
-    disabled
-    oneshot
-
-service slog /system/bin/slog -t
-    class main
-    user system
-    group system shell radio log sdcard_r sdcard_rw
-
-service refnotify_td /system/bin/refnotify -t 0
-    class main
-    user system
-	group system
-    disabled
-
-service refnotify_w /system/bin/refnotify -t 1
-    class main
-    user system
-    group system
-
-service refnotify_l /system/bin/refnotify -t 2
-    class main
-    user system
-    group system
-    disabled
 
 on property:persist.modem.w.enable=1
     symlink /dev/spipe_w1 /dev/vbpipe1
@@ -301,63 +215,6 @@ on property:persist.modem.t.enable=1
 on property:persist.modem.l.enable=1
     start refnotify_l
     start nvitemd_l
-
-#create symlink
-service smd_symlink /system/bin/ext_symlink.sh -u
-    user root
-    disabled
-    oneshot
-
-#data on
-service data_on /system/bin/ext_data.sh  -u
-    user root
-    disabled
-    oneshot
-
-#data off
-service data_off /system/bin/ext_data.sh  -d
-    user root
-    disabled
-    oneshot
-
-#kill td app
-service kill_td_phone /system/bin/ext_kill.sh  -t
-    user root
-    disabled
-    oneshot
-
-#kill w app
-service kill_w_phone /system/bin/ext_kill.sh  -w
-    user root
-    disabled
-    oneshot
-#kill lte app
-service kill_l_phone /system/bin/ext_kill.sh  -l
-    user root
-    disabled
-    oneshot
-
-#change owner
-service chown_service /system/bin/ext_chown.sh  -c
-    class main
-    user root
-    oneshot
-
-#set mac addr
-service set_mac /system/bin/ext_chown.sh  -e
-    user root
-    disabled
-    oneshot
-
-service  inputfreq  /system/bin/inputfreq.sh
-    user root
-    disabled
-    oneshot
-
-service  recoveryfreq  /system/bin/recoveryfreq.sh
-    user root
-    disabled
-    oneshot
 
     chmod 0666 /proc/pin_switch/iis0_sys_sel/cp0_iis0
     chmod 0666 /proc/pin_switch/iis0_sys_sel/cp1_iis0

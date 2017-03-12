@@ -1,3 +1,4 @@
+import /init.wifi.rc
 
 on early-init
     chown system system /sys/devices/platform/panel/backlight/panel/brightness
@@ -363,13 +364,6 @@ service drm /system/bin/drmserver
 on post-fs-data
     setprop vold.post_fs_data_done 1
 
-# GPS
-service gpsd /system/bin/gpsd -c /system/etc/gps.xml
-    class main
-    user gps
-    group system inet net_raw
-    ioprio be 0
-
 # This will make sure that sdcard service starts as late_start.
 on nonencrypted
     setprop ro.fuse_sdcard ${persist.fuse_sdcard}
@@ -384,20 +378,12 @@ on property:dev.bootcomplete=1
     write /sys/class/input/input1/enable 1
     start copy_cp_imgs
 
-# umount service
-service umount_service /system/bin/umount /preload
-    disabled
-    oneshot
-
 on property:persist.sys.storage_preload=1
     mount ext4 /dev/block/mmcblk0p19 /preload nosuid nodev noatime wait ro
     setprop storage.preload.complete 1
 
 on property:persist.sys.storage_preload=0
     start umount_service
-
-# service battery_charger /charger
-#    class charger
 
 on charger
     write /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor "powersave"
