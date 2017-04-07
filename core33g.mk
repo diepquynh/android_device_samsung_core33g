@@ -31,8 +31,9 @@ TARGET_SCREEN_WIDTH := 480
 PRODUCT_COPY_FILES += \
 	$(LOCAL_PATH)/keylayout/ist30xx_ts_input.kl:system/usr/keylayout/ist30xx_ts_input.kl
 
-# Media config
+# Media
 PRODUCT_PACKAGES += \
+	mediaserver.rc \
 	media_profiles.xml
 
 # Rootdir files
