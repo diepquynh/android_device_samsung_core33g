@@ -35,8 +35,10 @@ PRODUCT_COPY_FILES += \
 
 # Media
 PRODUCT_PACKAGES += \
-	mediaserver.rc \
 	media_profiles.xml
+
+PRODUCT_COPY_FILES += \
+	$(LOCAL_PATH)/media/mediaserver.rc:system/etc/init/mediaserver.rc
 
 # Rootdir files
 PRODUCT_PACKAGES += \
