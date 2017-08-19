@@ -52,7 +52,7 @@ PRODUCT_PACKAGES += \
 	rild.rc
 
 # WiFi
-$(call inherit-product, hardware/broadcom/wlan/bcmdhd/firmware/bcm4343/device-bcm.mk)
+$(call inherit-product, hardware/broadcom/wlan/bcmdhd/config/config-bcm.mk)
 
 # Set those variables here to overwrite the inherited values.
 PRODUCT_NAME := full_core33g
