@@ -1,0 +1,230 @@
+From c8c88c4d5c8610f93394cc30a3d46a693e66f36b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Quang=20Ng=C3=B4?= <ngoquang2708@gmail.com>
+Date: Sun, 13 Nov 2016 00:34:30 +0700
+Subject: [PATCH] Allow custom RIL to define the way it stores telephony
+ properties
+
+In multisim configuration, some RIL implementations do not store property
+values of a property in a array. Instead, they store these values in separate
+property name that have difference suffix corresponding to each phoneId.
+
+Change-Id: If956fd45ace5fd859226bde8c3db76da3f6b3ea4
+---
+ .../java/android/telephony/TelephonyManager.java   | 82 +++++++------------
+ .../internal/telephony/TelephonyStrategies.java    | 93 ++++++++++++++++++++++
+ 2 files changed, 123 insertions(+), 52 deletions(-)
+ create mode 100644 telephony/java/com/android/internal/telephony/TelephonyStrategies.java
+
+diff --git a/telephony/java/android/telephony/TelephonyManager.java b/telephony/java/android/telephony/TelephonyManager.java
+index 39b8f84297fcf..f177ab6af8691 100644
+--- a/telephony/java/android/telephony/TelephonyManager.java
++++ b/telephony/java/android/telephony/TelephonyManager.java
+@@ -53,6 +53,7 @@
+ import com.android.internal.telephony.PhoneConstants;
+ import com.android.internal.telephony.RILConstants;
+ import com.android.internal.telephony.TelephonyProperties;
++import com.android.internal.telephony.TelephonyStrategies;
+ 
+ import java.io.FileInputStream;
+ import java.io.IOException;
+@@ -117,6 +118,9 @@
+     private final int mSubId;
+     private SubscriptionManager mSubscriptionManager;
+ 
++    private static final TelephonyStrategies sTelephonyStrategies =
++            instantiateTelephonyStrategies();
++
+     private static String multiSimConfig =
+             SystemProperties.get(TelephonyProperties.PROPERTY_MULTI_SIM_CONFIG);
+ 
+@@ -3743,49 +3747,7 @@ public int getDefaultSim() {
+      * @hide
+      */
+     public static void setTelephonyProperty(int phoneId, String property, String value) {
+-        String propVal = "";
+-        String p[] = null;
+-        String prop = SystemProperties.get(property);
+-
+-        if (value == null) {
+-            value = "";
+-        }
+-
+-        if (prop != null) {
+-            p = prop.split(",");
+-        }
+-
+-        if (!SubscriptionManager.isValidPhoneId(phoneId)) {
+-            Rlog.d(TAG, "setTelephonyProperty: invalid phoneId=" + phoneId +
+-                    " property=" + property + " value: " + value + " prop=" + prop);
+-            return;
+-        }
+-
+-        for (int i = 0; i < phoneId; i++) {
+-            String str = "";
+-            if ((p != null) && (i < p.length)) {
+-                str = p[i];
+-            }
+-            propVal = propVal + str + ",";
+-        }
+-
+-        propVal = propVal + value;
+-        if (p != null) {
+-            for (int i = phoneId + 1; i < p.length; i++) {
+-                propVal = propVal + "," + p[i];
+-            }
+-        }
+-
+-        if (property.length() > SystemProperties.PROP_NAME_MAX
+-                || propVal.length() > SystemProperties.PROP_VALUE_MAX) {
+-            Rlog.d(TAG, "setTelephonyProperty: property to long phoneId=" + phoneId +
+-                    " property=" + property + " value: " + value + " propVal=" + propVal);
+-            return;
+-        }
+-
+-        Rlog.d(TAG, "setTelephonyProperty: success phoneId=" + phoneId +
+-                " property=" + property + " value: " + value + " propVal=" + propVal);
+-        SystemProperties.set(property, propVal);
++        sTelephonyStrategies.setTelephonyProperty(phoneId, property, value);
+     }
+ 
+     /**
+@@ -3882,15 +3844,31 @@ public static boolean putIntAtIndex(android.content.ContentResolver cr,
+      * @hide
+      */
+     public static String getTelephonyProperty(int phoneId, String property, String defaultVal) {
+-        String propVal = null;
+-        String prop = SystemProperties.get(property);
+-        if ((prop != null) && (prop.length() > 0)) {
+-            String values[] = prop.split(",");
+-            if ((phoneId >= 0) && (phoneId < values.length) && (values[phoneId] != null)) {
+-                propVal = values[phoneId];
+-            }
+-        }
+-        return propVal == null ? defaultVal : propVal;
++        return sTelephonyStrategies.getTelephonyProperty(phoneId, property, defaultVal);
++    }
++
++    /**
++     * Instantiate TelephonyStrategies
++     *
++     * @hide
++     */
++    private static TelephonyStrategies instantiateTelephonyStrategies() {
++        String classSimpleName = SystemProperties.get("ro.telephony.strategy_class").trim();
++        TelephonyStrategies result;
++        if (classSimpleName.isEmpty())
++            result = new TelephonyStrategies();
++        else {
++            try {
++                result = (TelephonyStrategies) Class
++                        .forName("com.android.internal.telephony." + classSimpleName)
++                        .newInstance();
++            } catch (Exception e) {
++                Rlog.e(TAG, "Unable to construct custom TelephonyStrategies class", e);
++                Rlog.e(TAG, "Fallback to default TelephonyStrategies class");
++                result = new TelephonyStrategies();
++             }
++         }
++        return result;
+     }
+ 
+     /** @hide */
+diff --git a/telephony/java/com/android/internal/telephony/TelephonyStrategies.java b/telephony/java/com/android/internal/telephony/TelephonyStrategies.java
+new file mode 100644
+index 0000000000000..069bf6ec46b1b
+--- /dev/null
++++ b/telephony/java/com/android/internal/telephony/TelephonyStrategies.java
+@@ -0,0 +1,93 @@
++/* 
++ * Copyright (C) 2016 The Android Open Source Project
++ *
++ * Copyright (C) 2016 The CyanogenMod Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.internal.telephony;
++
++import android.os.SystemProperties;
++
++import android.telephony.Rlog;
++import android.telephony.SubscriptionManager;
++
++/**
++ *
++ * @hide
++ */
++public class TelephonyStrategies {
++
++    private static final String TAG = TelephonyStrategies.class.getSimpleName();
++
++    public TelephonyStrategies() { }
++
++    public void setTelephonyProperty(int phoneId, String property, String value) {
++        String propVal = "";
++        String p[] = null;
++        String prop = SystemProperties.get(property);
++
++        if (value == null) {
++            value = "";
++        }
++
++        if (prop != null) {
++            p = prop.split(",");
++        }
++
++        if (!SubscriptionManager.isValidPhoneId(phoneId)) {
++            Rlog.d(TAG, "setTelephonyProperty: invalid phoneId=" + phoneId +
++                    " property=" + property + " value: " + value + " prop=" + prop);
++            return;
++        }
++
++        for (int i = 0; i < phoneId; i++) {
++            String str = "";
++            if ((p != null) && (i < p.length)) {
++                str = p[i];
++            }
++            propVal = propVal + str + ",";
++        }
++
++        propVal = propVal + value;
++        if (p != null) {
++            for (int i = phoneId + 1; i < p.length; i++) {
++                propVal = propVal + "," + p[i];
++            }
++        }
++
++        if (property.length() > SystemProperties.PROP_NAME_MAX
++                || propVal.length() > SystemProperties.PROP_VALUE_MAX) {
++            Rlog.d(TAG, "setTelephonyProperty: property to long phoneId=" + phoneId +
++                    " property=" + property + " value: " + value + " propVal=" + propVal);
++            return;
++        }
++
++        Rlog.d(TAG, "setTelephonyProperty: success phoneId=" + phoneId +
++                " property=" + property + " value: " + value + " propVal=" + propVal);
++        SystemProperties.set(property, propVal);
++    }
++
++    public String getTelephonyProperty(int phoneId, String property, String defaultVal) {
++        String propVal = null;
++        String prop = SystemProperties.get(property);
++        if ((prop != null) && (prop.length() > 0)) {
++            String values[] = prop.split(",");
++            if ((phoneId >= 0) && (phoneId < values.length) && (values[phoneId] != null)) {
++                propVal = values[phoneId];
++            }
++        }
++        return propVal == null ? defaultVal : propVal;
++    }
++}

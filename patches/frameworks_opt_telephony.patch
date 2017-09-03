@@ -1,0 +1,29 @@
+From f487a7078345a1189482e9dc9b67871d0bd0a93c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ng=C3=B4=20Minh=20Quang?= <ngoquang2708@gmail.com>
+Date: Mon, 23 May 2016 21:08:09 +0700
+Subject: [PATCH] Support setting RIL's socket names via system property
+
+Change-Id: I822df12f8533cd77ac196432c60341dde97aff14
+---
+ src/java/com/android/internal/telephony/RIL.java | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/java/com/android/internal/telephony/RIL.java b/src/java/com/android/internal/telephony/RIL.java
+index 68bf12e2e0..c7ad5768e5 100644
+--- a/src/java/com/android/internal/telephony/RIL.java
++++ b/src/java/com/android/internal/telephony/RIL.java
+@@ -327,7 +327,13 @@ private RILRequest() {
+     static final int RESPONSE_SOLICITED_ACK_EXP = 3;
+     static final int RESPONSE_UNSOLICITED_ACK_EXP = 4;
+ 
+-    static final String[] SOCKET_NAME_RIL = {"rild", "rild2", "rild3"};
++    static final String[] SOCKET_NAME_RIL;
++    static {
++        String rilSocketName = SystemProperties.get("ro.telephony.ril.socket_name");
++        SOCKET_NAME_RIL = rilSocketName.isEmpty()
++                ? new String[] { "rild", "rild2", "rild3" }
++                : rilSocketName.split(",");
++    }
+ 
+     static final int SOCKET_OPEN_RETRY_MILLIS = 4 * 1000;
+ 
