@@ -6,7 +6,7 @@ lib/libatparser.so
 etc/gps.conf
 bin/gpsd
 bin/gps.cer
-lib/liblcsagent.so
+lib/libsprd_agps_agent.so
 lib/hw/gps.default.so
 
 # Graphics rendering
@@ -21,22 +21,19 @@ etc/tiny_hw.xml
 lib/libfactoryutil.so
 lib/libomission_avoidance.so
 lib/libatchannel.so
+vendor/firmware/vbc_eq
 
 # WiFi
-etc/wifi/bcmdhd_apsta.bin
-etc/wifi/bcmdhd_mfg.bin
-etc/wifi/bcmdhd_sta.bin
-etc/wifi/nvram_mfg.txt
+bin/macloader
 
 # Bluetooth
-vendor/firmware/BCM43430A1_V0025.0070.hcd
+vendor/firmware/BCM4343A0_001.001.034.0056.0197_M_ORC_Core3.hcd
 
 # RIL
 bin/rild
 bin/modemd
 bin/nvitemd
 bin/phoneserver
-bin/modem_control
 bin/ext_data.sh
 bin/ext_kill.sh
 bin/ext_symlink.sh
@@ -49,22 +46,11 @@ lib/libsecnativefeature.so
 # Camera
 lib/libisp.so
 lib/libmorpho_easy_hdr.so
-lib/libcalibration.so
-lib/libAF.so
-lib/libsft_af_ctrl.so
-lib/libdeflicker.so
-lib/libynoise.so
-lib/libspaf.so
-lib/liblsc.so
-lib/libAl_Awb.so
-lib/libAl_Awb_Sp.so
-lib/libae.so
-lib/libawb.so
-
-# ION
-lib/libmemoryheapion.so
+lib/libuvdenoise.so
 
 # Codecs
+lib/libomx_aacdec_sprd.so
+lib/libomx_mp3dec_sprd.so
 lib/libomx_avcdec_hw_sprd.so
 lib/libomx_avcenc_hw_sprd.so
 lib/libomx_vpxdec_hw_sprd.so
@@ -74,7 +60,6 @@ lib/libomx_m4vh263enc_hw_sprd.so
 # HAL
 lib/hw/camera.sc8830.so
 lib/hw/gralloc.sc8830.so
+lib/hw/hwcomposer.sc8830.so
 lib/hw/sensors.sc8830.so
-
-# Magnetic sensor
-lib/libyasalgo.so
+lib/hw/sprd_gsp.sc8830.so
