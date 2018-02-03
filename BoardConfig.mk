@@ -48,9 +48,6 @@ WIFI_DRIVER_NVRAM_PATH := "/system/etc/wifi/nvram_net.txt"
 WIFI_BAND := 802_11_ABG
 BOARD_HAVE_SAMSUNG_WIFI := true
 
-# Bluetooth
-BOARD_BLUETOOTH_BDROID_BUILDCFG_INCLUDE_DIR := device/samsung/core33g/bluetooth
-
 # Kernel
 TARGET_KERNEL_CONFIG := cyanogen_core33g_defconfig
 TARGET_KERNEL_SOURCE := kernel/samsung/core33g
