@@ -37,6 +37,10 @@ PRODUCT_COPY_FILES += \
 PRODUCT_PACKAGES += \
 	media_profiles.xml
 
+PRODUCT_PROPERTY_OVERRIDES += \
+	media.stagefright.legacyencoder=true \
+	media.stagefright.less-secure=true
+
 PRODUCT_COPY_FILES += \
 	$(LOCAL_PATH)/media/mediaserver.rc:system/etc/init/mediaserver.rc
 
