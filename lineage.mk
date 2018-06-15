@@ -17,3 +17,10 @@ PRODUCT_BRAND := samsung
 PRODUCT_MODEL := SM-G360H
 PRODUCT_MANUFACTURER := samsung
 PRODUCT_CHARACTERISTICS := phone
+
+# Stock build fingerprint
+BUILD_FINGERPRINT := "samsung/core33gdd/core33g:4.4.4/KTU84P/G360HDDU0APA3:user/release-keys"
+PRIVATE_BUILD_DESC := "core33gdd-user 4.4.4 KTU84P G360HDDU0APA3 release-keys"
+
+PRODUCT_PROPERTY_OVERRIDES += \
+	ro.build.fingerprint=$(BUILD_FINGERPRINT)
