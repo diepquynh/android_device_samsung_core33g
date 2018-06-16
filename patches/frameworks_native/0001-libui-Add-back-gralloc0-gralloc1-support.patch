@@ -1,0 +1,2561 @@
+From 1246cf4b3b2ef96499948af148e2914d7024a991 Mon Sep 17 00:00:00 2001
+From: Nikit Sharma <nikitsharma92@gmail.com>
+Date: Wed, 16 May 2018 17:03:00 +0530
+Subject: [PATCH] libui: Add back gralloc0/gralloc1 support
+
+---
+ include/ui                                  |   1 -
+ include/ui/Gralloc1.h                       | 295 ++++++++++++++++
+ include/ui/Gralloc1On0Adapter.h             | 478 ++++++++++++++++++++++++++
+ libs/ui/Android.bp                          |   2 +
+ libs/ui/Gralloc1.cpp                        | 511 ++++++++++++++++++++++++++++
+ libs/ui/Gralloc1On0Adapter.cpp              | 503 +++++++++++++++++++++++++++
+ libs/ui/Gralloc2.cpp                        |   7 +-
+ libs/ui/GraphicBuffer.cpp                   |  40 ++-
+ libs/ui/GraphicBufferAllocator.cpp          | 115 +++++--
+ libs/ui/GraphicBufferMapper.cpp             | 266 +++++++++++++--
+ libs/ui/include/ui/Gralloc2.h               |   6 +
+ libs/ui/include/ui/GraphicBufferAllocator.h |  27 +-
+ libs/ui/include/ui/GraphicBufferMapper.h    |   8 +
+ 13 files changed, 2189 insertions(+), 70 deletions(-)
+ delete mode 120000 include/ui
+ create mode 100644 include/ui/Gralloc1.h
+ create mode 100644 include/ui/Gralloc1On0Adapter.h
+ create mode 100644 libs/ui/Gralloc1.cpp
+ create mode 100644 libs/ui/Gralloc1On0Adapter.cpp
+
+diff --git a/include/ui b/include/ui
+deleted file mode 120000
+index 2fb314766..000000000
+--- a/include/ui
++++ /dev/null
+@@ -1 +0,0 @@
+-../libs/ui/include/ui
+\ No newline at end of file
+diff --git a/include/ui/Gralloc1.h b/include/ui/Gralloc1.h
+new file mode 100644
+index 000000000..90713b334
+--- /dev/null
++++ b/include/ui/Gralloc1.h
+@@ -0,0 +1,295 @@
++/*
++ * Copyright 2016 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef ANDROID_UI_GRALLOC1_H
++#define ANDROID_UI_GRALLOC1_H
++
++#define GRALLOC1_LOG_TAG "Gralloc1"
++
++#include <functional>
++#include <memory>
++#include <unordered_set>
++
++#include <log/log.h>
++
++#include <ui/Fence.h>
++
++#include <hardware/gralloc1.h>
++
++
++namespace std {
++    template <>
++    struct hash<gralloc1_capability_t> {
++        size_t operator()(gralloc1_capability_t capability) const {
++            return std::hash<int32_t>()(static_cast<int32_t>(capability));
++        }
++    };
++}
++
++namespace android {
++class GraphicBuffer;
++class Fence;
++class GraphicBuffer;
++class Gralloc1On0Adapter;
++} // namespace android
++
++
++// This is not an "official" capability (i.e., it is not found in gralloc1.h),
++// but we will use it to detect that we are running through the adapter, which
++// is capable of collaborating with GraphicBuffer such that queries on a
++// buffer_handle_t succeed
++static const auto GRALLOC1_CAPABILITY_ON_ADAPTER =
++        static_cast<gralloc1_capability_t>(GRALLOC1_LAST_CAPABILITY + 1);
++
++static const auto GRALLOC1_FUNCTION_RETAIN_GRAPHIC_BUFFER =
++        static_cast<gralloc1_function_descriptor_t>(GRALLOC1_LAST_FUNCTION + 1);
++static const auto GRALLOC1_FUNCTION_ALLOCATE_WITH_ID =
++        static_cast<gralloc1_function_descriptor_t>(GRALLOC1_LAST_FUNCTION + 2);
++static const auto GRALLOC1_FUNCTION_LOCK_YCBCR =
++        static_cast<gralloc1_function_descriptor_t>(GRALLOC1_LAST_FUNCTION + 3);
++static const auto GRALLOC1_LAST_ADAPTER_FUNCTION = GRALLOC1_FUNCTION_LOCK_YCBCR;
++
++typedef gralloc1_error_t (*GRALLOC1_PFN_RETAIN_GRAPHIC_BUFFER)(
++        gralloc1_device_t* device, const android::GraphicBuffer* buffer);
++typedef gralloc1_error_t (*GRALLOC1_PFN_ALLOCATE_WITH_ID)(
++        gralloc1_device_t* device, gralloc1_buffer_descriptor_t descriptor,
++        gralloc1_backing_store_t id, buffer_handle_t* outBuffer);
++typedef int32_t /*gralloc1_error_t*/ (*GRALLOC1_PFN_LOCK_YCBCR)(
++        gralloc1_device_t* device, buffer_handle_t buffer,
++        uint64_t /*gralloc1_producer_usage_t*/ producerUsage,
++        uint64_t /*gralloc1_consumer_usage_t*/ consumerUsage,
++        const gralloc1_rect_t* accessRegion, struct android_ycbcr* outYCbCr,
++        int32_t acquireFence);
++
++
++namespace android {
++namespace Gralloc1 {
++
++class Device;
++
++class Descriptor {
++public:
++    Descriptor(Device& device, gralloc1_buffer_descriptor_t deviceId)
++      : mShimDevice(device),
++        mDeviceId(deviceId),
++        mWidth(0),
++        mHeight(0),
++        mFormat(static_cast<android_pixel_format_t>(0)),
++        mLayerCount(0),
++        mProducerUsage(GRALLOC1_PRODUCER_USAGE_NONE),
++        mConsumerUsage(GRALLOC1_CONSUMER_USAGE_NONE) {}
++
++    ~Descriptor();
++
++    gralloc1_buffer_descriptor_t getDeviceId() const { return mDeviceId; }
++
++    gralloc1_error_t setDimensions(uint32_t width, uint32_t height);
++    gralloc1_error_t setFormat(android_pixel_format_t format);
++    gralloc1_error_t setLayerCount(uint32_t layerCount);
++    gralloc1_error_t setProducerUsage(gralloc1_producer_usage_t usage);
++    gralloc1_error_t setConsumerUsage(gralloc1_consumer_usage_t usage);
++
++private:
++    Device& mShimDevice;
++    const gralloc1_buffer_descriptor_t mDeviceId;
++
++    uint32_t mWidth;
++    uint32_t mHeight;
++    android_pixel_format_t mFormat;
++    uint32_t mLayerCount;
++    gralloc1_producer_usage_t mProducerUsage;
++    gralloc1_consumer_usage_t mConsumerUsage;
++
++}; // Descriptor
++
++class Device {
++    friend class Gralloc1::Descriptor;
++
++public:
++    Device(gralloc1_device_t* device);
++
++    bool hasCapability(gralloc1_capability_t capability) const;
++
++    std::string dump();
++
++    std::shared_ptr<Descriptor> createDescriptor();
++
++    gralloc1_error_t allocate(
++            const std::vector<std::shared_ptr<const Descriptor>>& descriptors,
++            std::vector<buffer_handle_t>* outBuffers);
++    gralloc1_error_t allocate(
++            const std::shared_ptr<const Descriptor>& descriptor,
++            gralloc1_backing_store_t id, buffer_handle_t* outBuffer);
++
++    gralloc1_error_t retain(buffer_handle_t buffer);
++    gralloc1_error_t retain(const GraphicBuffer* buffer);
++
++    gralloc1_error_t release(buffer_handle_t buffer);
++
++    gralloc1_error_t getDimensions(buffer_handle_t buffer,
++            uint32_t* outWidth, uint32_t* outHeight);
++    gralloc1_error_t getFormat(buffer_handle_t buffer,
++            int32_t* outFormat);
++    gralloc1_error_t getLayerCount(buffer_handle_t buffer,
++            uint32_t* outLayerCount);
++    gralloc1_error_t getProducerUsage(buffer_handle_t buffer,
++            uint64_t* outProducerUsage);
++    gralloc1_error_t getConsumerUsage(buffer_handle_t buffer,
++            uint64_t* outConsumerUsage);
++    gralloc1_error_t getBackingStore(buffer_handle_t buffer,
++            uint64_t* outBackingStore);
++    gralloc1_error_t getStride(buffer_handle_t buffer, uint32_t* outStride);
++    gralloc1_error_t getNumFlexPlanes(buffer_handle_t buffer,
++            uint32_t* outNumPlanes);
++
++    gralloc1_error_t lock(buffer_handle_t buffer,
++            gralloc1_producer_usage_t producerUsage,
++            gralloc1_consumer_usage_t consumerUsage,
++            const gralloc1_rect_t* accessRegion, void** outData,
++            const sp<Fence>& acquireFence);
++    gralloc1_error_t lockFlex(buffer_handle_t buffer,
++            gralloc1_producer_usage_t producerUsage,
++            gralloc1_consumer_usage_t consumerUsage,
++            const gralloc1_rect_t* accessRegion,
++            struct android_flex_layout* outData, const sp<Fence>& acquireFence);
++    gralloc1_error_t lockYCbCr(buffer_handle_t buffer,
++            gralloc1_producer_usage_t producerUsage,
++            gralloc1_consumer_usage_t consumerUsage,
++            const gralloc1_rect_t* accessRegion, struct android_ycbcr* outData,
++            const sp<Fence>& acquireFence);
++
++    gralloc1_error_t unlock(buffer_handle_t buffer, sp<Fence>* outFence);
++
++private:
++    std::unordered_set<gralloc1_capability_t> loadCapabilities();
++
++    bool loadFunctions();
++
++    template <typename LockType, typename OutType>
++    gralloc1_error_t lockHelper(LockType pfn, buffer_handle_t buffer,
++            gralloc1_producer_usage_t producerUsage,
++            gralloc1_consumer_usage_t consumerUsage,
++            const gralloc1_rect_t* accessRegion, OutType* outData,
++            const sp<Fence>& acquireFence) {
++        int32_t intError = pfn(mDevice, buffer,
++                static_cast<uint64_t>(producerUsage),
++                static_cast<uint64_t>(consumerUsage), accessRegion, outData,
++                acquireFence->dup());
++        return static_cast<gralloc1_error_t>(intError);
++    }
++
++    gralloc1_device_t* const mDevice;
++
++    const std::unordered_set<gralloc1_capability_t> mCapabilities;
++
++    template <typename PFN, gralloc1_function_descriptor_t descriptor>
++    struct FunctionLoader {
++        FunctionLoader() : pfn(nullptr) {}
++
++        bool load(gralloc1_device_t* device, bool errorIfNull) {
++            gralloc1_function_pointer_t rawPointer =
++                    device->getFunction(device, descriptor);
++            pfn = reinterpret_cast<PFN>(rawPointer);
++            if (errorIfNull && !rawPointer) {
++                ALOG(LOG_ERROR, GRALLOC1_LOG_TAG,
++                        "Failed to load function pointer %d", descriptor);
++            }
++            return rawPointer != nullptr;
++        }
++
++        template <typename ...Args>
++        typename std::result_of<PFN(Args...)>::type operator()(Args... args) {
++            return pfn(args...);
++        }
++
++        PFN pfn;
++    };
++
++    // Function pointers
++    struct Functions {
++        FunctionLoader<GRALLOC1_PFN_DUMP, GRALLOC1_FUNCTION_DUMP> dump;
++        FunctionLoader<GRALLOC1_PFN_CREATE_DESCRIPTOR,
++                GRALLOC1_FUNCTION_CREATE_DESCRIPTOR> createDescriptor;
++        FunctionLoader<GRALLOC1_PFN_DESTROY_DESCRIPTOR,
++                GRALLOC1_FUNCTION_DESTROY_DESCRIPTOR> destroyDescriptor;
++        FunctionLoader<GRALLOC1_PFN_SET_CONSUMER_USAGE,
++                GRALLOC1_FUNCTION_SET_CONSUMER_USAGE> setConsumerUsage;
++        FunctionLoader<GRALLOC1_PFN_SET_DIMENSIONS,
++                GRALLOC1_FUNCTION_SET_DIMENSIONS> setDimensions;
++        FunctionLoader<GRALLOC1_PFN_SET_FORMAT,
++                GRALLOC1_FUNCTION_SET_FORMAT> setFormat;
++        FunctionLoader<GRALLOC1_PFN_SET_LAYER_COUNT,
++                GRALLOC1_FUNCTION_SET_LAYER_COUNT> setLayerCount;
++        FunctionLoader<GRALLOC1_PFN_SET_PRODUCER_USAGE,
++                GRALLOC1_FUNCTION_SET_PRODUCER_USAGE> setProducerUsage;
++        FunctionLoader<GRALLOC1_PFN_GET_BACKING_STORE,
++                GRALLOC1_FUNCTION_GET_BACKING_STORE> getBackingStore;
++        FunctionLoader<GRALLOC1_PFN_GET_CONSUMER_USAGE,
++                GRALLOC1_FUNCTION_GET_CONSUMER_USAGE> getConsumerUsage;
++        FunctionLoader<GRALLOC1_PFN_GET_DIMENSIONS,
++                GRALLOC1_FUNCTION_GET_DIMENSIONS> getDimensions;
++        FunctionLoader<GRALLOC1_PFN_GET_FORMAT,
++                GRALLOC1_FUNCTION_GET_FORMAT> getFormat;
++        FunctionLoader<GRALLOC1_PFN_GET_LAYER_COUNT,
++                GRALLOC1_FUNCTION_GET_LAYER_COUNT> getLayerCount;
++        FunctionLoader<GRALLOC1_PFN_GET_PRODUCER_USAGE,
++                GRALLOC1_FUNCTION_GET_PRODUCER_USAGE> getProducerUsage;
++        FunctionLoader<GRALLOC1_PFN_GET_STRIDE,
++                GRALLOC1_FUNCTION_GET_STRIDE> getStride;
++        FunctionLoader<GRALLOC1_PFN_ALLOCATE,
++                GRALLOC1_FUNCTION_ALLOCATE> allocate;
++        FunctionLoader<GRALLOC1_PFN_RETAIN,
++                GRALLOC1_FUNCTION_RETAIN> retain;
++        FunctionLoader<GRALLOC1_PFN_RELEASE,
++                GRALLOC1_FUNCTION_RELEASE> release;
++        FunctionLoader<GRALLOC1_PFN_GET_NUM_FLEX_PLANES,
++                GRALLOC1_FUNCTION_GET_NUM_FLEX_PLANES> getNumFlexPlanes;
++        FunctionLoader<GRALLOC1_PFN_LOCK,
++                GRALLOC1_FUNCTION_LOCK> lock;
++        FunctionLoader<GRALLOC1_PFN_LOCK_FLEX,
++                GRALLOC1_FUNCTION_LOCK_FLEX> lockFlex;
++        FunctionLoader<GRALLOC1_PFN_LOCK_YCBCR,
++                GRALLOC1_FUNCTION_LOCK_YCBCR> lockYCbCr;
++        FunctionLoader<GRALLOC1_PFN_UNLOCK,
++                GRALLOC1_FUNCTION_UNLOCK> unlock;
++
++        // Adapter-only functions
++        FunctionLoader<GRALLOC1_PFN_RETAIN_GRAPHIC_BUFFER,
++                GRALLOC1_FUNCTION_RETAIN_GRAPHIC_BUFFER> retainGraphicBuffer;
++        FunctionLoader<GRALLOC1_PFN_ALLOCATE_WITH_ID,
++                GRALLOC1_FUNCTION_ALLOCATE_WITH_ID> allocateWithId;
++    } mFunctions;
++
++}; // class android::Gralloc1::Device
++
++class Loader
++{
++public:
++    Loader();
++    ~Loader();
++
++    std::unique_ptr<Device> getDevice();
++
++private:
++    static std::unique_ptr<Gralloc1On0Adapter> mAdapter;
++    std::unique_ptr<Device> mDevice;
++};
++
++} // namespace android::Gralloc1
++
++} // namespace android
++
++#endif
+diff --git a/include/ui/Gralloc1On0Adapter.h b/include/ui/Gralloc1On0Adapter.h
+new file mode 100644
+index 000000000..6379a08bf
+--- /dev/null
++++ b/include/ui/Gralloc1On0Adapter.h
+@@ -0,0 +1,478 @@
++/*
++ * Copyright 2016 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef ANDROID_UI_GRALLOC_1_ON_0_ADAPTER_H
++#define ANDROID_UI_GRALLOC_1_ON_0_ADAPTER_H
++
++#include <log/log.h>
++
++#include <ui/Fence.h>
++
++#include <hardware/gralloc.h>
++#include <hardware/gralloc1.h>
++
++#include <mutex>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++namespace android {
++class GraphicBuffer;
++} // namespace android
++
++struct gralloc_module_t;
++
++namespace android {
++
++class Gralloc1On0Adapter : public gralloc1_device_t
++{
++public:
++    Gralloc1On0Adapter(const hw_module_t* module);
++    ~Gralloc1On0Adapter();
++
++    gralloc1_device_t* getDevice() {
++        return static_cast<gralloc1_device_t*>(this);
++    }
++
++private:
++    static inline Gralloc1On0Adapter* getAdapter(gralloc1_device_t* device) {
++        return static_cast<Gralloc1On0Adapter*>(device);
++    }
++
++    // getCapabilities
++
++    void doGetCapabilities(uint32_t* outCount,
++            int32_t* /*gralloc1_capability_t*/ outCapabilities);
++    static void getCapabilitiesHook(gralloc1_device_t* device,
++            uint32_t* outCount,
++            int32_t* /*gralloc1_capability_t*/ outCapabilities) {
++        getAdapter(device)->doGetCapabilities(outCount, outCapabilities);
++    }
++
++    // getFunction
++
++    gralloc1_function_pointer_t doGetFunction(
++            int32_t /*gralloc1_function_descriptor_t*/ descriptor);
++    static gralloc1_function_pointer_t getFunctionHook(
++            gralloc1_device_t* device,
++            int32_t /*gralloc1_function_descriptor_t*/ descriptor) {
++        return getAdapter(device)->doGetFunction(descriptor);
++    }
++
++    // dump
++
++    void dump(uint32_t* outSize, char* outBuffer);
++    static void dumpHook(gralloc1_device_t* device, uint32_t* outSize,
++            char* outBuffer) {
++        return getAdapter(device)->dump(outSize, outBuffer);
++    }
++    std::string mCachedDump;
++
++    // Buffer descriptor lifecycle functions
++
++    struct Descriptor;
++
++    gralloc1_error_t createDescriptor(
++            gralloc1_buffer_descriptor_t* outDescriptor);
++    static int32_t createDescriptorHook(gralloc1_device_t* device,
++            gralloc1_buffer_descriptor_t* outDescriptor) {
++        auto error = getAdapter(device)->createDescriptor(outDescriptor);
++        return static_cast<int32_t>(error);
++    }
++
++    gralloc1_error_t destroyDescriptor(gralloc1_buffer_descriptor_t descriptor);
++    static int32_t destroyDescriptorHook(gralloc1_device_t* device,
++            gralloc1_buffer_descriptor_t descriptor) {
++        auto error = getAdapter(device)->destroyDescriptor(descriptor);
++        return static_cast<int32_t>(error);
++    }
++
++    // Buffer descriptor modification functions
++
++    struct Descriptor : public std::enable_shared_from_this<Descriptor> {
++        Descriptor(Gralloc1On0Adapter* _adapter,
++                gralloc1_buffer_descriptor_t _id)
++          : adapter(_adapter),
++            id(_id),
++            width(0),
++            height(0),
++            format(HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED),
++            layerCount(1),
++            producerUsage(GRALLOC1_PRODUCER_USAGE_NONE),
++            consumerUsage(GRALLOC1_CONSUMER_USAGE_NONE) {}
++
++        gralloc1_error_t setDimensions(uint32_t w, uint32_t h) {
++            width = w;
++            height = h;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        gralloc1_error_t setFormat(int32_t f) {
++            format = f;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        gralloc1_error_t setLayerCount(uint32_t lc) {
++            layerCount = lc;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        gralloc1_error_t setProducerUsage(gralloc1_producer_usage_t usage) {
++            producerUsage = usage;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        gralloc1_error_t setConsumerUsage(gralloc1_consumer_usage_t usage) {
++            consumerUsage = usage;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        Gralloc1On0Adapter* const adapter;
++        const gralloc1_buffer_descriptor_t id;
++
++        uint32_t width;
++        uint32_t height;
++        int32_t format;
++        uint32_t layerCount;
++        gralloc1_producer_usage_t producerUsage;
++        gralloc1_consumer_usage_t consumerUsage;
++    };
++
++    template <typename ...Args>
++    static int32_t callDescriptorFunction(gralloc1_device_t* device,
++            gralloc1_buffer_descriptor_t descriptorId,
++            gralloc1_error_t (Descriptor::*member)(Args...), Args... args) {
++        auto descriptor = getAdapter(device)->getDescriptor(descriptorId);
++        if (!descriptor) {
++            return static_cast<int32_t>(GRALLOC1_ERROR_BAD_DESCRIPTOR);
++        }
++        auto error = ((*descriptor).*member)(std::forward<Args>(args)...);
++        return static_cast<int32_t>(error);
++    }
++
++    static int32_t setConsumerUsageHook(gralloc1_device_t* device,
++            gralloc1_buffer_descriptor_t descriptorId, uint64_t intUsage) {
++        auto usage = static_cast<gralloc1_consumer_usage_t>(intUsage);
++        return callDescriptorFunction(device, descriptorId,
++                &Descriptor::setConsumerUsage, usage);
++    }
++
++    static int32_t setDimensionsHook(gralloc1_device_t* device,
++            gralloc1_buffer_descriptor_t descriptorId, uint32_t width,
++            uint32_t height) {
++        return callDescriptorFunction(device, descriptorId,
++                &Descriptor::setDimensions, width, height);
++    }
++
++    static int32_t setFormatHook(gralloc1_device_t* device,
++            gralloc1_buffer_descriptor_t descriptorId, int32_t format) {
++        return callDescriptorFunction(device, descriptorId,
++                &Descriptor::setFormat, format);
++    }
++
++    static int32_t setLayerCountHook(gralloc1_device_t* device,
++            gralloc1_buffer_descriptor_t descriptorId, uint32_t layerCount) {
++        return callDescriptorFunction(device, descriptorId,
++                &Descriptor::setLayerCount, layerCount);
++    }
++
++    static int32_t setProducerUsageHook(gralloc1_device_t* device,
++            gralloc1_buffer_descriptor_t descriptorId, uint64_t intUsage) {
++        auto usage = static_cast<gralloc1_producer_usage_t>(intUsage);
++        return callDescriptorFunction(device, descriptorId,
++                &Descriptor::setProducerUsage, usage);
++    }
++
++    // Buffer handle query functions
++
++    class Buffer {
++    public:
++        Buffer(buffer_handle_t handle, gralloc1_backing_store_t store,
++                const Descriptor& descriptor, uint32_t stride,
++                bool wasAllocated);
++
++        buffer_handle_t getHandle() const { return mHandle; }
++
++        void retain() { ++mReferenceCount; }
++
++        // Returns true if the reference count has dropped to 0, indicating that
++        // the buffer needs to be released
++        bool release() { return --mReferenceCount == 0; }
++
++        bool wasAllocated() const { return mWasAllocated; }
++
++        gralloc1_error_t getBackingStore(
++                gralloc1_backing_store_t* outStore) const {
++            *outStore = mStore;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        gralloc1_error_t getConsumerUsage(
++                gralloc1_consumer_usage_t* outUsage) const {
++            *outUsage = mDescriptor.consumerUsage;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        gralloc1_error_t getDimensions(uint32_t* outWidth,
++                uint32_t* outHeight) const {
++            *outWidth = mDescriptor.width;
++            *outHeight = mDescriptor.height;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        gralloc1_error_t getFormat(int32_t* outFormat) const {
++            *outFormat = mDescriptor.format;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        gralloc1_error_t getLayerCount(uint32_t* outLayerCount) const {
++            *outLayerCount = mDescriptor.layerCount;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        gralloc1_error_t getNumFlexPlanes(uint32_t* outNumPlanes) const {
++            // TODO: This is conservative, and we could do better by examining
++            // the format, but it won't hurt anything for now
++            *outNumPlanes = 4;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        gralloc1_error_t getProducerUsage(
++                gralloc1_producer_usage_t* outUsage) const {
++            *outUsage = mDescriptor.producerUsage;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++        gralloc1_error_t getStride(uint32_t* outStride) const {
++            *outStride = mStride;
++            return GRALLOC1_ERROR_NONE;
++        }
++
++    private:
++
++        const buffer_handle_t mHandle;
++        size_t mReferenceCount;
++
++        // Since we're adapting to gralloc0, there will always be a 1:1
++        // correspondence between buffer handles and backing stores, and the
++        // backing store ID will be the same as the GraphicBuffer unique ID
++        const gralloc1_backing_store_t mStore;
++
++        const Descriptor mDescriptor;
++        const uint32_t mStride;
++
++        // Whether this buffer allocated in this process (as opposed to just
++        // being retained here), which determines whether to free or unregister
++        // the buffer when this Buffer is released
++        const bool mWasAllocated;
++    };
++
++    template <typename ...Args>
++    static int32_t callBufferFunction(gralloc1_device_t* device,
++            buffer_handle_t bufferHandle,
++            gralloc1_error_t (Buffer::*member)(Args...) const, Args... args) {
++        auto buffer = getAdapter(device)->getBuffer(bufferHandle);
++        if (!buffer) {
++            return static_cast<int32_t>(GRALLOC1_ERROR_BAD_HANDLE);
++        }
++        auto error = ((*buffer).*member)(std::forward<Args>(args)...);
++        return static_cast<int32_t>(error);
++    }
++
++    template <typename MF, MF memFunc, typename ...Args>
++    static int32_t bufferHook(gralloc1_device_t* device,
++            buffer_handle_t bufferHandle, Args... args) {
++        return Gralloc1On0Adapter::callBufferFunction(device, bufferHandle,
++                memFunc, std::forward<Args>(args)...);
++    }
++
++    static int32_t getConsumerUsageHook(gralloc1_device_t* device,
++            buffer_handle_t bufferHandle, uint64_t* outUsage) {
++        auto usage = GRALLOC1_CONSUMER_USAGE_NONE;
++        auto error = callBufferFunction(device, bufferHandle,
++                &Buffer::getConsumerUsage, &usage);
++        if (error == GRALLOC1_ERROR_NONE) {
++            *outUsage = static_cast<uint64_t>(usage);
++        }
++        return error;
++    }
++
++    static int32_t getProducerUsageHook(gralloc1_device_t* device,
++            buffer_handle_t bufferHandle, uint64_t* outUsage) {
++        auto usage = GRALLOC1_PRODUCER_USAGE_NONE;
++        auto error = callBufferFunction(device, bufferHandle,
++                &Buffer::getProducerUsage, &usage);
++        if (error == GRALLOC1_ERROR_NONE) {
++            *outUsage = static_cast<uint64_t>(usage);
++        }
++        return error;
++    }
++
++    // Buffer management functions
++
++    // We don't provide GRALLOC1_FUNCTION_ALLOCATE, since this should always be
++    // called through GRALLOC1_FUNCTION_ALLOCATE_WITH_ID
++    gralloc1_error_t allocate(
++            const std::shared_ptr<Descriptor>& descriptor,
++            gralloc1_backing_store_t id,
++            buffer_handle_t* outBufferHandle);
++    static gralloc1_error_t allocateWithIdHook(gralloc1_device_t* device,
++            gralloc1_buffer_descriptor_t descriptors,
++            gralloc1_backing_store_t id, buffer_handle_t* outBuffer);
++
++    gralloc1_error_t retain(const std::shared_ptr<Buffer>& buffer);
++    gralloc1_error_t release(const std::shared_ptr<Buffer>& buffer);
++
++    // Member function pointer 'member' will either be retain or release
++    template <gralloc1_error_t (Gralloc1On0Adapter::*member)(
++            const std::shared_ptr<Buffer>& buffer)>
++    static int32_t managementHook(gralloc1_device_t* device,
++            buffer_handle_t bufferHandle) {
++        auto adapter = getAdapter(device);
++
++        auto buffer = adapter->getBuffer(bufferHandle);
++        if (!buffer) {
++            return static_cast<int32_t>(GRALLOC1_ERROR_BAD_HANDLE);
++        }
++
++        auto error = ((*adapter).*member)(buffer);
++        return static_cast<int32_t>(error);
++    }
++
++    gralloc1_error_t retain(const GraphicBuffer* buffer);
++    static gralloc1_error_t retainGraphicBufferHook(gralloc1_device_t* device,
++            const GraphicBuffer* buffer) {
++        auto adapter = getAdapter(device);
++        return adapter->retain(buffer);
++    }
++
++    // Buffer access functions
++
++    gralloc1_error_t lock(const std::shared_ptr<Buffer>& buffer,
++            gralloc1_producer_usage_t producerUsage,
++            gralloc1_consumer_usage_t consumerUsage,
++            const gralloc1_rect_t& accessRegion, void** outData,
++            const sp<Fence>& acquireFence);
++    gralloc1_error_t lockFlex(const std::shared_ptr<Buffer>& buffer,
++            gralloc1_producer_usage_t producerUsage,
++            gralloc1_consumer_usage_t consumerUsage,
++            const gralloc1_rect_t& accessRegion,
++            struct android_flex_layout* outFlex,
++            const sp<Fence>& acquireFence);
++    gralloc1_error_t lockYCbCr(const std::shared_ptr<Buffer>& buffer,
++            gralloc1_producer_usage_t producerUsage,
++            gralloc1_consumer_usage_t consumerUsage,
++            const gralloc1_rect_t& accessRegion,
++            struct android_ycbcr* outFlex,
++            const sp<Fence>& acquireFence);
++
++    template <typename OUT, gralloc1_error_t (Gralloc1On0Adapter::*member)(
++            const std::shared_ptr<Buffer>&, gralloc1_producer_usage_t,
++            gralloc1_consumer_usage_t, const gralloc1_rect_t&, OUT*,
++            const sp<Fence>&)>
++    static int32_t lockHook(gralloc1_device_t* device,
++            buffer_handle_t bufferHandle,
++            uint64_t /*gralloc1_producer_usage_t*/ uintProducerUsage,
++            uint64_t /*gralloc1_consumer_usage_t*/ uintConsumerUsage,
++            const gralloc1_rect_t* accessRegion, OUT* outData,
++            int32_t acquireFenceFd) {
++        auto adapter = getAdapter(device);
++
++        // Exactly one of producer and consumer usage must be *_USAGE_NONE,
++        // but we can't check this until the upper levels of the framework
++        // correctly distinguish between producer and consumer usage
++        /*
++        bool hasProducerUsage =
++                uintProducerUsage != GRALLOC1_PRODUCER_USAGE_NONE;
++        bool hasConsumerUsage =
++                uintConsumerUsage != GRALLOC1_CONSUMER_USAGE_NONE;
++        if (hasProducerUsage && hasConsumerUsage ||
++                !hasProducerUsage && !hasConsumerUsage) {
++            return static_cast<int32_t>(GRALLOC1_ERROR_BAD_VALUE);
++        }
++        */
++
++        auto producerUsage =
++                static_cast<gralloc1_producer_usage_t>(uintProducerUsage);
++        auto consumerUsage =
++                static_cast<gralloc1_consumer_usage_t>(uintConsumerUsage);
++
++        if (!outData) {
++            const auto producerCpuUsage = GRALLOC1_PRODUCER_USAGE_CPU_READ |
++                    GRALLOC1_PRODUCER_USAGE_CPU_WRITE;
++            if ((producerUsage & producerCpuUsage) != 0) {
++                return static_cast<int32_t>(GRALLOC1_ERROR_BAD_VALUE);
++            }
++            if ((consumerUsage & GRALLOC1_CONSUMER_USAGE_CPU_READ) != 0) {
++                return static_cast<int32_t>(GRALLOC1_ERROR_BAD_VALUE);
++            }
++        }
++
++        auto buffer = adapter->getBuffer(bufferHandle);
++        if (!buffer) {
++            return static_cast<int32_t>(GRALLOC1_ERROR_BAD_HANDLE);
++        }
++
++        if (!accessRegion) {
++            ALOGE("accessRegion is null");
++            return static_cast<int32_t>(GRALLOC1_ERROR_BAD_VALUE);
++        }
++
++        sp<Fence> acquireFence{new Fence(acquireFenceFd)};
++        auto error = ((*adapter).*member)(buffer, producerUsage, consumerUsage,
++                *accessRegion, outData, acquireFence);
++        return static_cast<int32_t>(error);
++    }
++
++    gralloc1_error_t unlock(const std::shared_ptr<Buffer>& buffer,
++            sp<Fence>* outReleaseFence);
++    static int32_t unlockHook(gralloc1_device_t* device,
++            buffer_handle_t bufferHandle, int32_t* outReleaseFenceFd) {
++        auto adapter = getAdapter(device);
++
++        auto buffer = adapter->getBuffer(bufferHandle);
++        if (!buffer) {
++            return static_cast<int32_t>(GRALLOC1_ERROR_BAD_HANDLE);
++        }
++
++        sp<Fence> releaseFence = Fence::NO_FENCE;
++        auto error = adapter->unlock(buffer, &releaseFence);
++        if (error == GRALLOC1_ERROR_NONE) {
++            *outReleaseFenceFd = releaseFence->dup();
++        }
++        return static_cast<int32_t>(error);
++    }
++
++    // Adapter internals
++    const gralloc_module_t* mModule;
++    uint8_t mMinorVersion;
++    alloc_device_t* mDevice;
++
++    std::shared_ptr<Descriptor> getDescriptor(
++            gralloc1_buffer_descriptor_t descriptorId);
++    std::shared_ptr<Buffer> getBuffer(buffer_handle_t bufferHandle);
++
++    static std::atomic<gralloc1_buffer_descriptor_t> sNextBufferDescriptorId;
++    std::mutex mDescriptorMutex;
++    std::unordered_map<gralloc1_buffer_descriptor_t,
++            std::shared_ptr<Descriptor>> mDescriptors;
++    std::mutex mBufferMutex;
++    std::unordered_map<buffer_handle_t, std::shared_ptr<Buffer>> mBuffers;
++};
++
++} // namespace android
++
++#endif
+diff --git a/libs/ui/Android.bp b/libs/ui/Android.bp
+index 59173cbf3..31b0b2f1f 100644
+--- a/libs/ui/Android.bp
++++ b/libs/ui/Android.bp
+@@ -53,6 +53,8 @@ cc_library_shared {
+         "Fence.cpp",
+         "FenceTime.cpp",
+         "FrameStats.cpp",
++        "Gralloc1.cpp",
++        "Gralloc1On0Adapter.cpp", 
+         "Gralloc2.cpp",
+         "GraphicBuffer.cpp",
+         "GraphicBufferAllocator.cpp",
+diff --git a/libs/ui/Gralloc1.cpp b/libs/ui/Gralloc1.cpp
+new file mode 100644
+index 000000000..64a8b4044
+--- /dev/null
++++ b/libs/ui/Gralloc1.cpp
+@@ -0,0 +1,511 @@
++/*
++ * Copyright 2016 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++//#define LOG_NDEBUG 0
++
++#include <ui/Gralloc1.h>
++#include <ui/GraphicBuffer.h>
++#include <ui/Gralloc1On0Adapter.h>
++
++#include <vector>
++
++#undef LOG_TAG
++#define LOG_TAG GRALLOC1_LOG_TAG
++
++namespace android {
++
++namespace Gralloc1 {
++
++Descriptor::~Descriptor()
++{
++    int32_t intError = mShimDevice.mFunctions.destroyDescriptor(
++            mShimDevice.mDevice, mDeviceId);
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error != GRALLOC1_ERROR_NONE) {
++        ALOGE("destroyDescriptor failed: %d", intError);
++    }
++}
++
++gralloc1_error_t Descriptor::setDimensions(uint32_t width, uint32_t height)
++{
++    int32_t intError = mShimDevice.mFunctions.setDimensions(mShimDevice.mDevice,
++            mDeviceId, width, height);
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error != GRALLOC1_ERROR_NONE) {
++        return error;
++    }
++    mWidth = width;
++    mHeight = height;
++    return error;
++}
++
++template <typename ApiType>
++struct Setter {
++    typedef int32_t (*Type)(gralloc1_device_t*, gralloc1_buffer_descriptor_t,
++            ApiType);
++};
++
++template <typename ApiType, typename ValueType>
++static inline gralloc1_error_t setHelper(
++        typename Setter<ApiType>::Type setter, gralloc1_device_t* device,
++        gralloc1_buffer_descriptor_t id, ValueType newValue,
++        ValueType* cacheVariable)
++{
++    int32_t intError = setter(device, id, static_cast<ApiType>(newValue));
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error != GRALLOC1_ERROR_NONE) {
++        return error;
++    }
++    *cacheVariable = newValue;
++    return error;
++}
++
++gralloc1_error_t Descriptor::setFormat(android_pixel_format_t format)
++{
++    return setHelper<int32_t>(mShimDevice.mFunctions.setFormat.pfn,
++            mShimDevice.mDevice, mDeviceId, format, &mFormat);
++}
++
++gralloc1_error_t Descriptor::setLayerCount(uint32_t layerCount)
++{
++    if (mShimDevice.hasCapability(GRALLOC1_CAPABILITY_LAYERED_BUFFERS)) {
++        return setHelper<uint32_t>(mShimDevice.mFunctions.setLayerCount.pfn,
++                mShimDevice.mDevice, mDeviceId, layerCount, &mLayerCount);
++    } else {
++        // Layered buffers are not supported on this device.
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++}
++
++gralloc1_error_t Descriptor::setProducerUsage(gralloc1_producer_usage_t usage)
++{
++    return setHelper<uint64_t>(mShimDevice.mFunctions.setProducerUsage.pfn,
++            mShimDevice.mDevice, mDeviceId, usage, &mProducerUsage);
++}
++
++gralloc1_error_t Descriptor::setConsumerUsage(gralloc1_consumer_usage_t usage)
++{
++    return setHelper<uint64_t>(mShimDevice.mFunctions.setConsumerUsage.pfn,
++            mShimDevice.mDevice, mDeviceId, usage, &mConsumerUsage);
++}
++
++Device::Device(gralloc1_device_t* device)
++  : mDevice(device),
++    mCapabilities(loadCapabilities()),
++    mFunctions()
++{
++    if (!loadFunctions()) {
++        ALOGE("Failed to load a required function, aborting");
++        abort();
++    }
++}
++
++bool Device::hasCapability(gralloc1_capability_t capability) const
++{
++    return mCapabilities.count(capability) > 0;
++}
++
++std::string Device::dump()
++{
++    uint32_t length = 0;
++    mFunctions.dump(mDevice, &length, nullptr);
++
++    std::vector<char> output;
++    output.resize(length);
++    mFunctions.dump(mDevice, &length, output.data());
++
++    return std::string(output.cbegin(), output.cend());
++}
++
++std::shared_ptr<Descriptor> Device::createDescriptor()
++{
++    gralloc1_buffer_descriptor_t descriptorId;
++    int32_t intError = mFunctions.createDescriptor(mDevice, &descriptorId);
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error != GRALLOC1_ERROR_NONE) {
++        return nullptr;
++    }
++    auto descriptor = std::make_shared<Descriptor>(*this, descriptorId);
++    return descriptor;
++}
++
++static inline bool allocationSucceded(gralloc1_error_t error)
++{
++    return error == GRALLOC1_ERROR_NONE || error == GRALLOC1_ERROR_NOT_SHARED;
++}
++
++gralloc1_error_t Device::allocate(
++        const std::vector<std::shared_ptr<const Descriptor>>& descriptors,
++        std::vector<buffer_handle_t>* outBuffers)
++{
++    if (mFunctions.allocate.pfn == nullptr) {
++        // Allocation is not supported on this device
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++
++    std::vector<gralloc1_buffer_descriptor_t> deviceIds;
++    for (const auto& descriptor : descriptors) {
++        deviceIds.emplace_back(descriptor->getDeviceId());
++    }
++
++    std::vector<buffer_handle_t> buffers(descriptors.size());
++    int32_t intError = mFunctions.allocate(mDevice,
++            static_cast<uint32_t>(descriptors.size()), deviceIds.data(),
++            buffers.data());
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (allocationSucceded(error)) {
++        *outBuffers = std::move(buffers);
++    }
++
++    return error;
++}
++
++gralloc1_error_t Device::allocate(
++        const std::shared_ptr<const Descriptor>& descriptor,
++        gralloc1_backing_store_t id, buffer_handle_t* outBuffer)
++{
++    gralloc1_error_t error = GRALLOC1_ERROR_NONE;
++
++    if (hasCapability(GRALLOC1_CAPABILITY_ON_ADAPTER)) {
++        buffer_handle_t buffer = nullptr;
++        int32_t intError = mFunctions.allocateWithId(mDevice,
++                descriptor->getDeviceId(), id, &buffer);
++        error = static_cast<gralloc1_error_t>(intError);
++        if (allocationSucceded(error)) {
++            *outBuffer = buffer;
++        }
++    } else {
++        std::vector<std::shared_ptr<const Descriptor>> descriptors;
++        descriptors.emplace_back(descriptor);
++        std::vector<buffer_handle_t> buffers;
++        error = allocate(descriptors, &buffers);
++        if (allocationSucceded(error)) {
++            *outBuffer = buffers[0];
++        }
++    }
++
++    return error;
++}
++
++gralloc1_error_t Device::retain(buffer_handle_t buffer)
++{
++    int32_t intError = mFunctions.retain(mDevice, buffer);
++    return static_cast<gralloc1_error_t>(intError);
++}
++
++gralloc1_error_t Device::retain(const GraphicBuffer* buffer)
++{
++    if (hasCapability(GRALLOC1_CAPABILITY_ON_ADAPTER)) {
++        return mFunctions.retainGraphicBuffer(mDevice, buffer);
++    } else {
++        return retain(buffer->getNativeBuffer()->handle);
++    }
++}
++
++gralloc1_error_t Device::release(buffer_handle_t buffer)
++{
++    int32_t intError = mFunctions.release(mDevice, buffer);
++    return static_cast<gralloc1_error_t>(intError);
++}
++
++gralloc1_error_t Device::getDimensions(buffer_handle_t buffer,
++        uint32_t* outWidth, uint32_t* outHeight)
++{
++    uint32_t width = 0;
++    uint32_t height = 0;
++    int32_t intError = mFunctions.getDimensions(mDevice, buffer, &width,
++            &height);
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error == GRALLOC1_ERROR_NONE) {
++        *outWidth = width;
++        *outHeight = height;
++    }
++    return error;
++}
++
++gralloc1_error_t Device::getFormat(buffer_handle_t buffer,
++        int32_t* outFormat)
++{
++    int32_t format = 0;
++    int32_t intError = mFunctions.getFormat(mDevice, buffer, &format);
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error == GRALLOC1_ERROR_NONE) {
++        *outFormat = format;
++    }
++    return error;
++}
++
++gralloc1_error_t Device::getLayerCount(buffer_handle_t buffer,
++        uint32_t* outLayerCount)
++{
++    if (hasCapability(GRALLOC1_CAPABILITY_LAYERED_BUFFERS)) {
++        uint32_t layerCount = 0;
++        int32_t intError = mFunctions.getLayerCount(mDevice, buffer,
++                &layerCount);
++        auto error = static_cast<gralloc1_error_t>(intError);
++        if (error == GRALLOC1_ERROR_NONE) {
++            *outLayerCount = layerCount;
++        }
++        return error;
++    } else {
++        // Layered buffers are not supported on this device.
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++}
++
++gralloc1_error_t Device::getProducerUsage(buffer_handle_t buffer,
++        uint64_t* outProducerUsage)
++{
++    uint64_t usage = 0;
++    int32_t intError = mFunctions.getProducerUsage(mDevice, buffer, &usage);
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error == GRALLOC1_ERROR_NONE) {
++        *outProducerUsage = usage;
++    }
++    return error;
++}
++
++gralloc1_error_t Device::getConsumerUsage(buffer_handle_t buffer,
++        uint64_t* outConsumerUsage)
++{
++    uint64_t usage = 0;
++    int32_t intError = mFunctions.getConsumerUsage(mDevice, buffer, &usage);
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error == GRALLOC1_ERROR_NONE) {
++        *outConsumerUsage = usage;
++    }
++    return error;
++}
++
++gralloc1_error_t Device::getBackingStore(buffer_handle_t buffer,
++        uint64_t* outBackingStore)
++{
++    uint64_t store = 0;
++    int32_t intError = mFunctions.getBackingStore(mDevice, buffer, &store);
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error == GRALLOC1_ERROR_NONE) {
++        *outBackingStore = store;
++    }
++    return error;
++}
++
++gralloc1_error_t Device::getStride(buffer_handle_t buffer,
++        uint32_t* outStride)
++{
++    uint32_t stride = 0;
++    int32_t intError = mFunctions.getStride(mDevice, buffer, &stride);
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error == GRALLOC1_ERROR_NONE) {
++        *outStride = stride;
++    }
++    return error;
++}
++
++gralloc1_error_t Device::getNumFlexPlanes(buffer_handle_t buffer,
++        uint32_t* outNumPlanes)
++{
++    uint32_t numPlanes = 0;
++    int32_t intError = mFunctions.getNumFlexPlanes(mDevice, buffer, &numPlanes);
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error == GRALLOC1_ERROR_NONE) {
++        *outNumPlanes = numPlanes;
++    }
++    return error;
++}
++
++gralloc1_error_t Device::lock(buffer_handle_t buffer,
++        gralloc1_producer_usage_t producerUsage,
++        gralloc1_consumer_usage_t consumerUsage,
++        const gralloc1_rect_t* accessRegion, void** outData,
++        const sp<Fence>& acquireFence)
++{
++    ALOGV("Calling lock(%p)", buffer);
++    return lockHelper(mFunctions.lock, buffer, producerUsage,
++            consumerUsage, accessRegion, outData, acquireFence);
++}
++
++gralloc1_error_t Device::lockFlex(buffer_handle_t buffer,
++        gralloc1_producer_usage_t producerUsage,
++        gralloc1_consumer_usage_t consumerUsage,
++        const gralloc1_rect_t* accessRegion,
++        struct android_flex_layout* outData,
++        const sp<Fence>& acquireFence)
++{
++    ALOGV("Calling lockFlex(%p)", buffer);
++    return lockHelper(mFunctions.lockFlex, buffer, producerUsage,
++            consumerUsage, accessRegion, outData, acquireFence);
++}
++
++gralloc1_error_t Device::lockYCbCr(buffer_handle_t buffer,
++        gralloc1_producer_usage_t producerUsage,
++        gralloc1_consumer_usage_t consumerUsage,
++        const gralloc1_rect_t* accessRegion,
++        struct android_ycbcr* outData,
++        const sp<Fence>& acquireFence)
++{
++    ALOGV("Calling lockYCbCr(%p)", buffer);
++    return lockHelper(mFunctions.lockYCbCr, buffer, producerUsage,
++            consumerUsage, accessRegion, outData, acquireFence);
++}
++
++gralloc1_error_t Device::unlock(buffer_handle_t buffer, sp<Fence>* outFence)
++{
++    int32_t fenceFd = -1;
++    int32_t intError = mFunctions.unlock(mDevice, buffer, &fenceFd);
++    auto error = static_cast<gralloc1_error_t>(intError);
++    if (error == GRALLOC1_ERROR_NONE) {
++        *outFence = new Fence(fenceFd);
++    }
++    return error;
++}
++
++std::unordered_set<gralloc1_capability_t> Device::loadCapabilities()
++{
++    std::vector<int32_t> intCapabilities;
++    uint32_t numCapabilities = 0;
++    mDevice->getCapabilities(mDevice, &numCapabilities, nullptr);
++
++    intCapabilities.resize(numCapabilities);
++    mDevice->getCapabilities(mDevice, &numCapabilities, intCapabilities.data());
++
++    std::unordered_set<gralloc1_capability_t> capabilities;
++    for (const auto intCapability : intCapabilities) {
++        capabilities.emplace(static_cast<gralloc1_capability_t>(intCapability));
++    }
++    return capabilities;
++}
++
++bool Device::loadFunctions()
++{
++    // Functions which must always be present
++    if (!mFunctions.dump.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.createDescriptor.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.destroyDescriptor.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.setConsumerUsage.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.setDimensions.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.setFormat.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.setProducerUsage.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.getBackingStore.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.getConsumerUsage.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.getDimensions.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.getFormat.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.getProducerUsage.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.getStride.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.retain.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.release.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.getNumFlexPlanes.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.lock.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.lockFlex.load(mDevice, true)) {
++        return false;
++    }
++    if (!mFunctions.unlock.load(mDevice, true)) {
++        return false;
++    }
++
++    if (hasCapability(GRALLOC1_CAPABILITY_ON_ADAPTER)) {
++        // These should always be present on the adapter
++        if (!mFunctions.retainGraphicBuffer.load(mDevice, true)) {
++            return false;
++        }
++        if (!mFunctions.lockYCbCr.load(mDevice, true)) {
++            return false;
++        }
++
++        // allocateWithId may not be present if we're only able to map in this
++        // process
++        mFunctions.allocateWithId.load(mDevice, false);
++    } else {
++        // allocate may not be present if we're only able to map in this process
++        mFunctions.allocate.load(mDevice, false);
++    }
++
++    if (hasCapability(GRALLOC1_CAPABILITY_LAYERED_BUFFERS)) {
++        if (!mFunctions.setLayerCount.load(mDevice, true)) {
++            return false;
++        }
++        if (!mFunctions.getLayerCount.load(mDevice, true)) {
++            return false;
++        }
++    }
++
++    return true;
++}
++
++std::unique_ptr<Gralloc1On0Adapter> Loader::mAdapter = nullptr;
++
++Loader::Loader()
++  : mDevice(nullptr)
++{
++    hw_module_t const* module;
++    int err = hw_get_module(GRALLOC_HARDWARE_MODULE_ID, &module);
++    uint8_t majorVersion = (module->module_api_version >> 8) & 0xFF;
++    uint8_t minorVersion = module->module_api_version & 0xFF;
++    gralloc1_device_t* device = nullptr;
++    if (majorVersion == 1) {
++        gralloc1_open(module, &device);
++    } else {
++        if (!mAdapter) {
++            mAdapter = std::make_unique<Gralloc1On0Adapter>(module);
++        }
++        device = mAdapter->getDevice();
++    }
++    mDevice = std::make_unique<Gralloc1::Device>(device);
++}
++
++Loader::~Loader() {}
++
++std::unique_ptr<Device> Loader::getDevice()
++{
++    return std::move(mDevice);
++}
++
++} // namespace android::Gralloc1
++
++} // namespace android
+diff --git a/libs/ui/Gralloc1On0Adapter.cpp b/libs/ui/Gralloc1On0Adapter.cpp
+new file mode 100644
+index 000000000..0fac7efaa
+--- /dev/null
++++ b/libs/ui/Gralloc1On0Adapter.cpp
+@@ -0,0 +1,503 @@
++/*
++ * Copyright 2016 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#undef LOG_TAG
++#define LOG_TAG "Gralloc1On0Adapter"
++//#define LOG_NDEBUG 0
++
++#include <ui/Gralloc1On0Adapter.h>
++
++#include <algorithm>
++#include <array>
++
++#include <grallocusage/GrallocUsageConversion.h>
++
++#include <hardware/gralloc.h>
++
++#include <ui/GraphicBuffer.h>
++#include <ui/Gralloc1.h>
++
++#include <utils/Log.h>
++
++#include <inttypes.h>
++
++template <typename PFN, typename T>
++static gralloc1_function_pointer_t asFP(T function)
++{
++    static_assert(std::is_same<PFN, T>::value, "Incompatible function pointer");
++    return reinterpret_cast<gralloc1_function_pointer_t>(function);
++}
++
++namespace android {
++
++Gralloc1On0Adapter::Gralloc1On0Adapter(const hw_module_t* module)
++  : mModule(reinterpret_cast<const gralloc_module_t*>(module)),
++    mMinorVersion(mModule->common.module_api_version & 0xFF),
++    mDevice(nullptr)
++{
++    ALOGV("Constructing");
++    getCapabilities = getCapabilitiesHook;
++    getFunction = getFunctionHook;
++    int error = ::gralloc_open(&(mModule->common), &mDevice);
++    if (error) {
++        ALOGE("Failed to open gralloc0 module: %d", error);
++    }
++    ALOGV("Opened gralloc0 device %p", mDevice);
++}
++
++Gralloc1On0Adapter::~Gralloc1On0Adapter()
++{
++    ALOGV("Destructing");
++    if (mDevice) {
++        ALOGV("Closing gralloc0 device %p", mDevice);
++        ::gralloc_close(mDevice);
++    }
++}
++
++void Gralloc1On0Adapter::doGetCapabilities(uint32_t* outCount,
++        int32_t* outCapabilities)
++{
++    constexpr std::array<int32_t, 2> supportedCapabilities = {{
++        GRALLOC1_CAPABILITY_ON_ADAPTER,
++        GRALLOC1_CAPABILITY_RELEASE_IMPLY_DELETE,
++    }};
++
++    if (outCapabilities == nullptr) {
++        *outCount = supportedCapabilities.size();
++    } else {
++        *outCount = std::min(*outCount, static_cast<uint32_t>(
++                    supportedCapabilities.size()));
++        std::copy_n(supportedCapabilities.begin(),
++                *outCount, outCapabilities);
++    }
++}
++
++gralloc1_function_pointer_t Gralloc1On0Adapter::doGetFunction(
++        int32_t intDescriptor)
++{
++    constexpr auto lastDescriptor =
++            static_cast<int32_t>(GRALLOC1_LAST_ADAPTER_FUNCTION);
++    if (intDescriptor < 0 || intDescriptor > lastDescriptor) {
++        ALOGE("Invalid function descriptor");
++        return nullptr;
++    }
++
++    auto descriptor =
++            static_cast<gralloc1_function_descriptor_t>(intDescriptor);
++    switch (descriptor) {
++        case GRALLOC1_FUNCTION_DUMP:
++            return asFP<GRALLOC1_PFN_DUMP>(dumpHook);
++        case GRALLOC1_FUNCTION_CREATE_DESCRIPTOR:
++            return asFP<GRALLOC1_PFN_CREATE_DESCRIPTOR>(createDescriptorHook);
++        case GRALLOC1_FUNCTION_DESTROY_DESCRIPTOR:
++            return asFP<GRALLOC1_PFN_DESTROY_DESCRIPTOR>(destroyDescriptorHook);
++        case GRALLOC1_FUNCTION_SET_CONSUMER_USAGE:
++            return asFP<GRALLOC1_PFN_SET_CONSUMER_USAGE>(setConsumerUsageHook);
++        case GRALLOC1_FUNCTION_SET_DIMENSIONS:
++            return asFP<GRALLOC1_PFN_SET_DIMENSIONS>(setDimensionsHook);
++        case GRALLOC1_FUNCTION_SET_FORMAT:
++            return asFP<GRALLOC1_PFN_SET_FORMAT>(setFormatHook);
++        case GRALLOC1_FUNCTION_SET_LAYER_COUNT:
++            return asFP<GRALLOC1_PFN_SET_LAYER_COUNT>(setLayerCountHook);
++        case GRALLOC1_FUNCTION_SET_PRODUCER_USAGE:
++            return asFP<GRALLOC1_PFN_SET_PRODUCER_USAGE>(setProducerUsageHook);
++        case GRALLOC1_FUNCTION_GET_BACKING_STORE:
++            return asFP<GRALLOC1_PFN_GET_BACKING_STORE>(
++                    bufferHook<decltype(&Buffer::getBackingStore),
++                    &Buffer::getBackingStore, gralloc1_backing_store_t*>);
++        case GRALLOC1_FUNCTION_GET_CONSUMER_USAGE:
++            return asFP<GRALLOC1_PFN_GET_CONSUMER_USAGE>(getConsumerUsageHook);
++        case GRALLOC1_FUNCTION_GET_DIMENSIONS:
++            return asFP<GRALLOC1_PFN_GET_DIMENSIONS>(
++                    bufferHook<decltype(&Buffer::getDimensions),
++                    &Buffer::getDimensions, uint32_t*, uint32_t*>);
++        case GRALLOC1_FUNCTION_GET_FORMAT:
++            return asFP<GRALLOC1_PFN_GET_FORMAT>(
++                    bufferHook<decltype(&Buffer::getFormat),
++                    &Buffer::getFormat, int32_t*>);
++        case GRALLOC1_FUNCTION_GET_LAYER_COUNT:
++            return asFP<GRALLOC1_PFN_GET_LAYER_COUNT>(
++                    bufferHook<decltype(&Buffer::getLayerCount),
++                    &Buffer::getLayerCount, uint32_t*>);
++        case GRALLOC1_FUNCTION_GET_PRODUCER_USAGE:
++            return asFP<GRALLOC1_PFN_GET_PRODUCER_USAGE>(getProducerUsageHook);
++        case GRALLOC1_FUNCTION_GET_STRIDE:
++            return asFP<GRALLOC1_PFN_GET_STRIDE>(
++                    bufferHook<decltype(&Buffer::getStride),
++                    &Buffer::getStride, uint32_t*>);
++        case GRALLOC1_FUNCTION_ALLOCATE:
++            // Not provided, since we'll use ALLOCATE_WITH_ID
++            return nullptr;
++        case GRALLOC1_FUNCTION_ALLOCATE_WITH_ID:
++            if (mDevice != nullptr) {
++                return asFP<GRALLOC1_PFN_ALLOCATE_WITH_ID>(allocateWithIdHook);
++            } else {
++                return nullptr;
++            }
++        case GRALLOC1_FUNCTION_RETAIN:
++            return asFP<GRALLOC1_PFN_RETAIN>(
++                    managementHook<&Gralloc1On0Adapter::retain>);
++        case GRALLOC1_FUNCTION_RELEASE:
++            return asFP<GRALLOC1_PFN_RELEASE>(
++                    managementHook<&Gralloc1On0Adapter::release>);
++        case GRALLOC1_FUNCTION_RETAIN_GRAPHIC_BUFFER:
++            return asFP<GRALLOC1_PFN_RETAIN_GRAPHIC_BUFFER>(
++                    retainGraphicBufferHook);
++        case GRALLOC1_FUNCTION_GET_NUM_FLEX_PLANES:
++            return asFP<GRALLOC1_PFN_GET_NUM_FLEX_PLANES>(
++                    bufferHook<decltype(&Buffer::getNumFlexPlanes),
++                    &Buffer::getNumFlexPlanes, uint32_t*>);
++        case GRALLOC1_FUNCTION_LOCK:
++            return asFP<GRALLOC1_PFN_LOCK>(
++                    lockHook<void*, &Gralloc1On0Adapter::lock>);
++        case GRALLOC1_FUNCTION_LOCK_FLEX:
++            return asFP<GRALLOC1_PFN_LOCK_FLEX>(
++                    lockHook<struct android_flex_layout,
++                    &Gralloc1On0Adapter::lockFlex>);
++        case GRALLOC1_FUNCTION_LOCK_YCBCR:
++            return asFP<GRALLOC1_PFN_LOCK_YCBCR>(
++                    lockHook<struct android_ycbcr,
++                    &Gralloc1On0Adapter::lockYCbCr>);
++        case GRALLOC1_FUNCTION_UNLOCK:
++            return asFP<GRALLOC1_PFN_UNLOCK>(unlockHook);
++        case GRALLOC1_FUNCTION_INVALID:
++            ALOGE("Invalid function descriptor");
++            return nullptr;
++        case GRALLOC1_LAST_FUNCTION:
++            return nullptr;
++    }
++
++    ALOGE("Unknown function descriptor: %d", intDescriptor);
++    return nullptr;
++}
++
++void Gralloc1On0Adapter::dump(uint32_t* outSize, char* outBuffer)
++{
++    ALOGV("dump(%u (%p), %p", outSize ? *outSize : 0, outSize, outBuffer);
++
++    if (!mDevice->dump) {
++        // dump is optional on gralloc0 implementations
++        *outSize = 0;
++        return;
++    }
++
++    if (!outBuffer) {
++        constexpr int32_t BUFFER_LENGTH = 4096;
++        char buffer[BUFFER_LENGTH] = {};
++        mDevice->dump(mDevice, buffer, BUFFER_LENGTH);
++        buffer[BUFFER_LENGTH - 1] = 0; // Ensure the buffer is null-terminated
++        size_t actualLength = std::strlen(buffer);
++        mCachedDump.resize(actualLength);
++        std::copy_n(buffer, actualLength, mCachedDump.begin());
++        *outSize = static_cast<uint32_t>(actualLength);
++    } else {
++        *outSize = std::min(*outSize,
++                static_cast<uint32_t>(mCachedDump.size()));
++        outBuffer = std::copy_n(mCachedDump.cbegin(), *outSize, outBuffer);
++    }
++}
++
++gralloc1_error_t Gralloc1On0Adapter::createDescriptor(
++        gralloc1_buffer_descriptor_t* outDescriptor)
++{
++    auto descriptorId = sNextBufferDescriptorId++;
++    std::lock_guard<std::mutex> lock(mDescriptorMutex);
++    mDescriptors.emplace(descriptorId,
++            std::make_shared<Descriptor>(this, descriptorId));
++
++    ALOGV("Created descriptor %" PRIu64, descriptorId);
++
++    *outDescriptor = descriptorId;
++    return GRALLOC1_ERROR_NONE;
++}
++
++gralloc1_error_t Gralloc1On0Adapter::destroyDescriptor(
++        gralloc1_buffer_descriptor_t descriptor)
++{
++    ALOGV("Destroying descriptor %" PRIu64, descriptor);
++
++    std::lock_guard<std::mutex> lock(mDescriptorMutex);
++    if (mDescriptors.count(descriptor) == 0) {
++        return GRALLOC1_ERROR_BAD_DESCRIPTOR;
++    }
++
++    mDescriptors.erase(descriptor);
++    return GRALLOC1_ERROR_NONE;
++}
++
++Gralloc1On0Adapter::Buffer::Buffer(buffer_handle_t handle,
++        gralloc1_backing_store_t store, const Descriptor& descriptor,
++        uint32_t stride, bool wasAllocated)
++  : mHandle(handle),
++    mReferenceCount(1),
++    mStore(store),
++    mDescriptor(descriptor),
++    mStride(stride),
++    mWasAllocated(wasAllocated) {}
++
++gralloc1_error_t Gralloc1On0Adapter::allocate(
++        const std::shared_ptr<Descriptor>& descriptor,
++        gralloc1_backing_store_t store,
++        buffer_handle_t* outBufferHandle)
++{
++    ALOGV("allocate(%" PRIu64 ", %#" PRIx64 ")", descriptor->id, store);
++
++    // If this function is being called, it's because we handed out its function
++    // pointer, which only occurs when mDevice has been loaded successfully and
++    // we are permitted to allocate
++
++    int usage = android_convertGralloc1To0Usage(descriptor->producerUsage,
++            descriptor->consumerUsage);
++    buffer_handle_t handle = nullptr;
++    int stride = 0;
++    ALOGV("Calling alloc(%p, %u, %u, %i, %u)", mDevice, descriptor->width,
++            descriptor->height, descriptor->format, usage);
++    auto error = mDevice->alloc(mDevice,
++            static_cast<int>(descriptor->width),
++            static_cast<int>(descriptor->height), descriptor->format,
++            usage, &handle, &stride);
++    if (error != 0) {
++        ALOGE("gralloc0 allocation failed: %d (%s)", error,
++                strerror(-error));
++        return GRALLOC1_ERROR_NO_RESOURCES;
++    }
++
++    *outBufferHandle = handle;
++    auto buffer = std::make_shared<Buffer>(handle, store, *descriptor, stride,
++            true);
++
++    std::lock_guard<std::mutex> lock(mBufferMutex);
++    mBuffers.emplace(handle, std::move(buffer));
++
++    return GRALLOC1_ERROR_NONE;
++}
++
++gralloc1_error_t Gralloc1On0Adapter::allocateWithIdHook(
++        gralloc1_device_t* device, gralloc1_buffer_descriptor_t descriptorId,
++        gralloc1_backing_store_t store, buffer_handle_t* outBuffer)
++{
++    auto adapter = getAdapter(device);
++
++    auto descriptor = adapter->getDescriptor(descriptorId);
++    if (!descriptor) {
++        return GRALLOC1_ERROR_BAD_DESCRIPTOR;
++    }
++
++    buffer_handle_t bufferHandle = nullptr;
++    auto error = adapter->allocate(descriptor, store, &bufferHandle);
++    if (error != GRALLOC1_ERROR_NONE) {
++        return error;
++    }
++
++    *outBuffer = bufferHandle;
++    return error;
++}
++
++gralloc1_error_t Gralloc1On0Adapter::retain(
++        const std::shared_ptr<Buffer>& buffer)
++{
++    std::lock_guard<std::mutex> lock(mBufferMutex);
++    buffer->retain();
++    return GRALLOC1_ERROR_NONE;
++}
++
++gralloc1_error_t Gralloc1On0Adapter::release(
++        const std::shared_ptr<Buffer>& buffer)
++{
++    std::lock_guard<std::mutex> lock(mBufferMutex);
++    if (!buffer->release()) {
++        return GRALLOC1_ERROR_NONE;
++    }
++
++    buffer_handle_t handle = buffer->getHandle();
++    if (buffer->wasAllocated()) {
++        ALOGV("Calling free(%p)", handle);
++        int result = mDevice->free(mDevice, handle);
++        if (result != 0) {
++            ALOGE("gralloc0 free failed: %d", result);
++        }
++    } else {
++        ALOGV("Calling unregisterBuffer(%p)", handle);
++        int result = mModule->unregisterBuffer(mModule, handle);
++        if (result != 0) {
++            ALOGE("gralloc0 unregister failed: %d", result);
++        }
++
++        native_handle_close(handle);
++        native_handle_delete(const_cast<native_handle_t*>(handle));
++    }
++
++    mBuffers.erase(handle);
++    return GRALLOC1_ERROR_NONE;
++}
++
++gralloc1_error_t Gralloc1On0Adapter::retain(
++        const android::GraphicBuffer* graphicBuffer)
++{
++    ALOGV("retainGraphicBuffer(%p, %#" PRIx64 ")",
++            graphicBuffer->getNativeBuffer()->handle, graphicBuffer->getId());
++
++    buffer_handle_t handle = graphicBuffer->getNativeBuffer()->handle;
++    std::lock_guard<std::mutex> lock(mBufferMutex);
++    if (mBuffers.count(handle) != 0) {
++        mBuffers[handle]->retain();
++        return GRALLOC1_ERROR_NONE;
++    }
++
++    ALOGV("Calling registerBuffer(%p)", handle);
++    int result = mModule->registerBuffer(mModule, handle);
++    if (result != 0) {
++        ALOGE("gralloc0 register failed: %d", result);
++        return GRALLOC1_ERROR_NO_RESOURCES;
++    }
++
++    Descriptor descriptor{this, sNextBufferDescriptorId++};
++    descriptor.setDimensions(graphicBuffer->getWidth(),
++            graphicBuffer->getHeight());
++    descriptor.setFormat(graphicBuffer->getPixelFormat());
++    descriptor.setProducerUsage(
++            static_cast<gralloc1_producer_usage_t>(graphicBuffer->getUsage()));
++    descriptor.setConsumerUsage(
++            static_cast<gralloc1_consumer_usage_t>(graphicBuffer->getUsage()));
++    auto buffer = std::make_shared<Buffer>(handle,
++            static_cast<gralloc1_backing_store_t>(graphicBuffer->getId()),
++            descriptor, graphicBuffer->getStride(), false);
++    mBuffers.emplace(handle, std::move(buffer));
++    return GRALLOC1_ERROR_NONE;
++}
++
++gralloc1_error_t Gralloc1On0Adapter::lock(
++        const std::shared_ptr<Buffer>& buffer,
++        gralloc1_producer_usage_t producerUsage,
++        gralloc1_consumer_usage_t consumerUsage,
++        const gralloc1_rect_t& accessRegion, void** outData,
++        const sp<Fence>& acquireFence)
++{
++    if (mMinorVersion >= 3) {
++        int result = mModule->lockAsync(mModule, buffer->getHandle(),
++                android_convertGralloc1To0Usage(producerUsage, consumerUsage),
++                accessRegion.left, accessRegion.top, accessRegion.width,
++                accessRegion.height, outData, acquireFence->dup());
++        if (result != 0) {
++            return GRALLOC1_ERROR_UNSUPPORTED;
++        }
++    } else {
++        acquireFence->waitForever("Gralloc1On0Adapter::lock");
++        int result = mModule->lock(mModule, buffer->getHandle(),
++                android_convertGralloc1To0Usage(producerUsage, consumerUsage),
++                accessRegion.left, accessRegion.top, accessRegion.width,
++                accessRegion.height, outData);
++        ALOGV("gralloc0 lock returned %d", result);
++        if (result != 0) {
++            return GRALLOC1_ERROR_UNSUPPORTED;
++        }
++    }
++    return GRALLOC1_ERROR_NONE;
++}
++
++gralloc1_error_t Gralloc1On0Adapter::lockFlex(
++        const std::shared_ptr<Buffer>& /*buffer*/,
++        gralloc1_producer_usage_t /*producerUsage*/,
++        gralloc1_consumer_usage_t /*consumerUsage*/,
++        const gralloc1_rect_t& /*accessRegion*/,
++        struct android_flex_layout* /*outData*/,
++        const sp<Fence>& /*acquireFence*/)
++{
++    // TODO
++    return GRALLOC1_ERROR_UNSUPPORTED;
++}
++
++gralloc1_error_t Gralloc1On0Adapter::lockYCbCr(
++        const std::shared_ptr<Buffer>& buffer,
++        gralloc1_producer_usage_t producerUsage,
++        gralloc1_consumer_usage_t consumerUsage,
++        const gralloc1_rect_t& accessRegion, struct android_ycbcr* outData,
++        const sp<Fence>& acquireFence)
++{
++    if (mMinorVersion >= 3 && mModule->lockAsync_ycbcr) {
++        int result = mModule->lockAsync_ycbcr(mModule, buffer->getHandle(),
++                android_convertGralloc1To0Usage(producerUsage, consumerUsage),
++                accessRegion.left, accessRegion.top, accessRegion.width,
++                accessRegion.height, outData, acquireFence->dup());
++        if (result != 0) {
++            return GRALLOC1_ERROR_UNSUPPORTED;
++        }
++    } else if (mModule->lock_ycbcr) {
++        acquireFence->waitForever("Gralloc1On0Adapter::lockYCbCr");
++        int result = mModule->lock_ycbcr(mModule, buffer->getHandle(),
++                android_convertGralloc1To0Usage(producerUsage, consumerUsage),
++                accessRegion.left, accessRegion.top, accessRegion.width,
++                accessRegion.height, outData);
++        ALOGV("gralloc0 lockYCbCr returned %d", result);
++        if (result != 0) {
++            return GRALLOC1_ERROR_UNSUPPORTED;
++        }
++    } else {
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++
++    return GRALLOC1_ERROR_NONE;
++}
++
++gralloc1_error_t Gralloc1On0Adapter::unlock(
++        const std::shared_ptr<Buffer>& buffer,
++        sp<Fence>* outReleaseFence)
++{
++    if (mMinorVersion >= 3) {
++        int fenceFd = -1;
++        int result = mModule->unlockAsync(mModule, buffer->getHandle(),
++                &fenceFd);
++        if (result != 0) {
++            close(fenceFd);
++            ALOGE("gralloc0 unlockAsync failed: %d", result);
++        } else {
++            *outReleaseFence = new Fence(fenceFd);
++        }
++    } else {
++        int result = mModule->unlock(mModule, buffer->getHandle());
++        if (result != 0) {
++            ALOGE("gralloc0 unlock failed: %d", result);
++        }
++    }
++    return GRALLOC1_ERROR_NONE;
++}
++
++std::shared_ptr<Gralloc1On0Adapter::Descriptor>
++Gralloc1On0Adapter::getDescriptor(gralloc1_buffer_descriptor_t descriptorId)
++{
++    std::lock_guard<std::mutex> lock(mDescriptorMutex);
++    if (mDescriptors.count(descriptorId) == 0) {
++        return nullptr;
++    }
++
++    return mDescriptors[descriptorId];
++}
++
++std::shared_ptr<Gralloc1On0Adapter::Buffer> Gralloc1On0Adapter::getBuffer(
++        buffer_handle_t bufferHandle)
++{
++    std::lock_guard<std::mutex> lock(mBufferMutex);
++    if (mBuffers.count(bufferHandle) == 0) {
++        return nullptr;
++    }
++
++    return mBuffers[bufferHandle];
++}
++
++std::atomic<gralloc1_buffer_descriptor_t>
++        Gralloc1On0Adapter::sNextBufferDescriptorId(1);
++
++} // namespace android
+diff --git a/libs/ui/Gralloc2.cpp b/libs/ui/Gralloc2.cpp
+index 0eb08e59a..d252fb077 100644
+--- a/libs/ui/Gralloc2.cpp
++++ b/libs/ui/Gralloc2.cpp
+@@ -39,7 +39,7 @@ void Mapper::preload() {
+ Mapper::Mapper()
+ {
+     mMapper = IMapper::getService();
+-    if (mMapper == nullptr || mMapper->isRemote()) {
++    if (mMapper != nullptr && mMapper->isRemote()) {
+         LOG_ALWAYS_FATAL("gralloc-mapper must be in passthrough mode");
+     }
+ }
+@@ -202,9 +202,8 @@ int Mapper::unlock(buffer_handle_t bufferHandle) const
+ Allocator::Allocator(const Mapper& mapper)
+     : mMapper(mapper)
+ {
+-    mAllocator = IAllocator::getService();
+-    if (mAllocator == nullptr) {
+-        LOG_ALWAYS_FATAL("gralloc-alloc is missing");
++    if (mMapper.valid()) {
++        mAllocator = IAllocator::getService();
+     }
+ }
+ 
+diff --git a/libs/ui/GraphicBuffer.cpp b/libs/ui/GraphicBuffer.cpp
+index c8805000a..17722d6ed 100644
+--- a/libs/ui/GraphicBuffer.cpp
++++ b/libs/ui/GraphicBuffer.cpp
+@@ -186,6 +186,18 @@ status_t GraphicBuffer::initWithHandle(const native_handle_t* handle,
+         PixelFormat format, uint32_t layerCount, uint64_t usage,
+         uint32_t stride)
+ {
++    native_handle_t* clone = nullptr;
++
++    if (method == CLONE_HANDLE) {
++        clone = native_handle_clone(handle);
++        if (!clone) {
++            return NO_MEMORY;
++        }
++
++        handle = clone;
++        method = TAKE_UNREGISTERED_HANDLE;
++    }
++
+     ANativeWindowBuffer::width  = static_cast<int>(width);
+     ANativeWindowBuffer::height = static_cast<int>(height);
+     ANativeWindowBuffer::stride = static_cast<int>(stride);
+@@ -194,28 +206,25 @@ status_t GraphicBuffer::initWithHandle(const native_handle_t* handle,
+     ANativeWindowBuffer::usage_deprecated = int(usage);
+ 
+     ANativeWindowBuffer::layerCount = layerCount;
++    ANativeWindowBuffer::handle = handle;
+ 
+     mOwner = (method == WRAP_HANDLE) ? ownNone : ownHandle;
+ 
+-    if (method == TAKE_UNREGISTERED_HANDLE || method == CLONE_HANDLE) {
+-        buffer_handle_t importedHandle;
+-        status_t err = mBufferMapper.importBuffer(handle, &importedHandle);
++    if (method == TAKE_UNREGISTERED_HANDLE) {
++        status_t err = mBufferMapper.importBuffer(this);
+         if (err != NO_ERROR) {
++            // clean up cloned handle
++            if (clone) {
++                native_handle_close(clone);
++                native_handle_delete(clone);
++            }
++
+             initWithHandle(nullptr, WRAP_HANDLE, 0, 0, 0, 0, 0, 0);
+ 
+             return err;
+         }
+-
+-        if (method == TAKE_UNREGISTERED_HANDLE) {
+-            native_handle_close(handle);
+-            native_handle_delete(const_cast<native_handle_t*>(handle));
+-        }
+-
+-        handle = importedHandle;
+     }
+ 
+-    ANativeWindowBuffer::handle = handle;
+-
+     return NO_ERROR;
+ }
+ 
+@@ -456,8 +465,7 @@ status_t GraphicBuffer::unflatten(
+     mOwner = ownHandle;
+ 
+     if (handle != 0) {
+-        buffer_handle_t importedHandle;
+-        status_t err = mBufferMapper.importBuffer(handle, &importedHandle);
++        status_t err = mBufferMapper.importBuffer(this);
+         if (err != NO_ERROR) {
+             width = height = stride = format = usage_deprecated = 0;
+             layerCount = 0;
+@@ -466,10 +474,6 @@ status_t GraphicBuffer::unflatten(
+             ALOGE("unflatten: registerBuffer failed: %s (%d)", strerror(-err), err);
+             return err;
+         }
+-
+-        native_handle_close(handle);
+-        native_handle_delete(const_cast<native_handle_t*>(handle));
+-        handle = importedHandle;
+     }
+ 
+     buffer = static_cast<void const*>(static_cast<uint8_t const*>(buffer) + sizeNeeded);
+diff --git a/libs/ui/GraphicBufferAllocator.cpp b/libs/ui/GraphicBufferAllocator.cpp
+index eaba1ed1a..1321f0ec6 100644
+--- a/libs/ui/GraphicBufferAllocator.cpp
++++ b/libs/ui/GraphicBufferAllocator.cpp
+@@ -46,6 +46,10 @@ GraphicBufferAllocator::GraphicBufferAllocator()
+     mAllocator(std::make_unique<Gralloc2::Allocator>(
+                 mMapper.getGrallocMapper()))
+ {
++    if (!mAllocator->valid()) {
++        mLoader = std::make_unique<Gralloc1::Loader>();
++        mDevice = mLoader->getDevice();
++    }
+ }
+ 
+ GraphicBufferAllocator::~GraphicBufferAllocator() {}
+@@ -81,7 +85,13 @@ void GraphicBufferAllocator::dump(String8& result) const
+     snprintf(buffer, SIZE, "Total allocated (estimate): %.2f KB\n", total/1024.0);
+     result.append(buffer);
+ 
+-    std::string deviceDump = mAllocator->dumpDebugInfo();
++    std::string deviceDump;
++    if (mAllocator->valid()) {
++        deviceDump = mAllocator->dumpDebugInfo();
++    } else {
++        deviceDump = mDevice->dump();
++    }
++
+     result.append(deviceDump.c_str(), deviceDump.size());
+ }
+ 
+@@ -95,7 +105,7 @@ void GraphicBufferAllocator::dumpToSystemLog()
+ status_t GraphicBufferAllocator::allocate(uint32_t width, uint32_t height,
+         PixelFormat format, uint32_t layerCount, uint64_t usage,
+         buffer_handle_t* handle, uint32_t* stride,
+-        uint64_t /*graphicBufferId*/, std::string requestorName)
++        uint64_t graphicBufferId, std::string requestorName)
+ {
+     ATRACE_CALL();
+ 
+@@ -108,15 +118,78 @@ status_t GraphicBufferAllocator::allocate(uint32_t width, uint32_t height,
+     if (layerCount < 1)
+         layerCount = 1;
+ 
+-    Gralloc2::IMapper::BufferDescriptorInfo info = {};
+-    info.width = width;
+-    info.height = height;
+-    info.layerCount = layerCount;
+-    info.format = static_cast<Gralloc2::PixelFormat>(format);
+-    info.usage = usage;
++    gralloc1_error_t error;
++    if (mAllocator->valid()) {
++        Gralloc2::IMapper::BufferDescriptorInfo info = {};
++        info.width = width;
++        info.height = height;
++        info.layerCount = layerCount;
++        info.format = static_cast<Gralloc2::PixelFormat>(format);
++        info.usage = usage;
++        error = static_cast<gralloc1_error_t>(mAllocator->allocate(info,
++                    stride, handle));
++        if (error != GRALLOC1_ERROR_NONE) {
++            return NO_MEMORY;
++        }
++    } else {
++        uint64_t producerUsage, consumerUsage;
++        android_convertGralloc0To1Usage(static_cast<int32_t>(usage), &producerUsage, &consumerUsage);
++
++        auto descriptor = mDevice->createDescriptor();
++        error = descriptor->setDimensions(width, height);
++        if (error != GRALLOC1_ERROR_NONE) {
++            ALOGE("Failed to set dimensions to (%u, %u): %d",
++                    width, height, error);
++            return BAD_VALUE;
++        }
++        error = descriptor->setFormat(
++                static_cast<android_pixel_format_t>(format));
++        if (error != GRALLOC1_ERROR_NONE) {
++            ALOGE("Failed to set format to %d: %d", format, error);
++            return BAD_VALUE;
++        }
++        if (mDevice->hasCapability(GRALLOC1_CAPABILITY_LAYERED_BUFFERS)) {
++            error = descriptor->setLayerCount(layerCount);
++            if (error != GRALLOC1_ERROR_NONE) {
++                ALOGE("Failed to set layer count to %u: %d", layerCount, error);
++                return BAD_VALUE;
++            }
++        } else if (layerCount > 1) {
++            ALOGE("Failed to set layer count to %u: capability unsupported",
++                    layerCount);
++            return BAD_VALUE;
++        }
++        error = descriptor->setProducerUsage(
++                static_cast<gralloc1_producer_usage_t>(producerUsage));
++        if (error != GRALLOC1_ERROR_NONE) {
++            ALOGE("Failed to set producer usage to %" PRIx64 ": %d",
++                    producerUsage, error);
++            return BAD_VALUE;
++        }
++        error = descriptor->setConsumerUsage(
++                static_cast<gralloc1_consumer_usage_t>(consumerUsage));
++        if (error != GRALLOC1_ERROR_NONE) {
++            ALOGE("Failed to set consumer usage to %" PRIx64 ": %d",
++                    consumerUsage, error);
++            return BAD_VALUE;
++        }
+ 
+-    Gralloc2::Error error = mAllocator->allocate(info, stride, handle);
+-    if (error == Gralloc2::Error::NONE) {
++        error = mDevice->allocate(descriptor, graphicBufferId, handle);
++        if (error != GRALLOC1_ERROR_NONE) {
++            ALOGE("Failed to allocate (%u x %u) layerCount %u format %d "
++                    "producerUsage %" PRIx64 " consumerUsage %" PRIx64 ": %d",
++                    width, height, layerCount, format, producerUsage,
++                    consumerUsage, error);
++            return NO_MEMORY;
++        }
++
++        error = mDevice->getStride(*handle, stride);
++        if (error != GRALLOC1_ERROR_NONE) {
++            ALOGW("Failed to get stride from buffer: %d", error);
++        }
++    }
++
++    if (error == NO_ERROR) {
+         Mutex::Autolock _l(sLock);
+         KeyedVector<buffer_handle_t, alloc_rec_t>& list(sAllocList);
+         uint32_t bpp = bytesPerPixel(format);
+@@ -131,23 +204,25 @@ status_t GraphicBufferAllocator::allocate(uint32_t width, uint32_t height,
+         rec.requestorName = std::move(requestorName);
+         list.add(*handle, rec);
+ 
+-        return NO_ERROR;
+-    } else {
+-        ALOGE("Failed to allocate (%u x %u) layerCount %u format %d "
+-                "usage %" PRIx64 ": %d",
+-                width, height, layerCount, format, usage,
+-                error);
+-        return NO_MEMORY;
+     }
++
++    return NO_ERROR;
+ }
+ 
+ status_t GraphicBufferAllocator::free(buffer_handle_t handle)
+ {
+     ATRACE_CALL();
+ 
+-    // We allocated a buffer from the allocator and imported it into the
+-    // mapper to get the handle.  We just need to free the handle now.
+-    mMapper.freeBuffer(handle);
++    gralloc1_error_t error;
++    if (mAllocator->valid()) {
++        error = static_cast<gralloc1_error_t>(mMapper.freeBuffer(handle));
++    } else {
++        error = mDevice->release(handle);
++    }
++
++    if (error != GRALLOC1_ERROR_NONE) {
++        ALOGE("Failed to free buffer: %d", error);
++    }
+ 
+     Mutex::Autolock _l(sLock);
+     KeyedVector<buffer_handle_t, alloc_rec_t>& list(sAllocList);
+diff --git a/libs/ui/GraphicBufferMapper.cpp b/libs/ui/GraphicBufferMapper.cpp
+index d52c50800..1485c8a84 100644
+--- a/libs/ui/GraphicBufferMapper.cpp
++++ b/libs/ui/GraphicBufferMapper.cpp
+@@ -49,6 +49,10 @@ void GraphicBufferMapper::preloadHal() {
+ GraphicBufferMapper::GraphicBufferMapper()
+   : mMapper(std::make_unique<const Gralloc2::Mapper>())
+ {
++    if (!mMapper->valid()) {
++        mLoader = std::make_unique<Gralloc1::Loader>();
++        mDevice = mLoader->getDevice();
++    }
+ }
+ 
+ status_t GraphicBufferMapper::importBuffer(buffer_handle_t rawHandle,
+@@ -56,8 +60,13 @@ status_t GraphicBufferMapper::importBuffer(buffer_handle_t rawHandle,
+ {
+     ATRACE_CALL();
+ 
+-    Gralloc2::Error error = mMapper->importBuffer(
+-            hardware::hidl_handle(rawHandle), outHandle);
++    Gralloc2::Error error;
++    if (mMapper->valid()) {
++        error = mMapper->importBuffer(hardware::hidl_handle(rawHandle),
++                outHandle);
++    } else {
++        error = Gralloc2::Error::UNSUPPORTED;
++    }
+ 
+     ALOGW_IF(error != Gralloc2::Error::NONE, "importBuffer(%p) failed: %d",
+             rawHandle, error);
+@@ -65,13 +74,77 @@ status_t GraphicBufferMapper::importBuffer(buffer_handle_t rawHandle,
+     return static_cast<status_t>(error);
+ }
+ 
++status_t GraphicBufferMapper::importBuffer(const GraphicBuffer* buffer)
++{
++    ATRACE_CALL();
++
++    ANativeWindowBuffer* nativeBuffer = buffer->getNativeBuffer();
++    buffer_handle_t rawHandle = nativeBuffer->handle;
++
++    gralloc1_error_t error;
++    if (mMapper->valid()) {
++        buffer_handle_t importedHandle;
++        error = static_cast<gralloc1_error_t>(mMapper->importBuffer(
++                    hardware::hidl_handle(rawHandle), &importedHandle));
++        if (error == GRALLOC1_ERROR_NONE) {
++            nativeBuffer->handle = importedHandle;
++        }
++    } else {
++        native_handle_t* clonedHandle = native_handle_clone(rawHandle);
++        if (clonedHandle) {
++            nativeBuffer->handle = clonedHandle;
++            error = mDevice->retain(buffer);
++            if (error != GRALLOC1_ERROR_NONE) {
++                nativeBuffer->handle = rawHandle;
++                native_handle_close(clonedHandle);
++                native_handle_delete(clonedHandle);
++            }
++        } else {
++            error = GRALLOC1_ERROR_NO_RESOURCES;
++        }
++    }
++
++    // the raw handle is owned by GraphicBuffer and is now replaced
++    if (error == GRALLOC1_ERROR_NONE) {
++        native_handle_close(rawHandle);
++        native_handle_delete(const_cast<native_handle_t*>(rawHandle));
++    }
++
++    ALOGW_IF(error != GRALLOC1_ERROR_NONE, "importBuffer(%p) failed: %d",
++            rawHandle, error);
++
++    return error;
++}
++
+ status_t GraphicBufferMapper::freeBuffer(buffer_handle_t handle)
+ {
+     ATRACE_CALL();
+ 
+-    mMapper->freeBuffer(handle);
++    gralloc1_error_t error;
++    if (mMapper->valid()) {
++        mMapper->freeBuffer(handle);
++        error = GRALLOC1_ERROR_NONE;
++    } else {
++        error = mDevice->release(handle);
++        if (!mDevice->hasCapability(GRALLOC1_CAPABILITY_RELEASE_IMPLY_DELETE)) {
++            native_handle_close(handle);
++            native_handle_delete(const_cast<native_handle_t*>(handle));
++        }
++    }
++
++    ALOGW_IF(error != GRALLOC1_ERROR_NONE, "freeBuffer(%p): failed %d",
++            handle, error);
++
++    return error;
++}
+ 
+-    return NO_ERROR;
++static inline gralloc1_rect_t asGralloc1Rect(const Rect& rect) {
++    gralloc1_rect_t outRect{};
++    outRect.left = rect.left;
++    outRect.top = rect.top;
++    outRect.width = rect.width();
++    outRect.height = rect.height();
++    return outRect;
+ }
+ 
+ static inline Gralloc2::IMapper::Rect asGralloc2Rect(const Rect& rect) {
+@@ -118,15 +191,26 @@ status_t GraphicBufferMapper::lockAsync(buffer_handle_t handle,
+ {
+     ATRACE_CALL();
+ 
+-    const uint64_t usage = static_cast<uint64_t>(
+-            android_convertGralloc1To0Usage(producerUsage, consumerUsage));
+-    Gralloc2::Error error = mMapper->lock(handle, usage,
+-            asGralloc2Rect(bounds), fenceFd, vaddr);
++    gralloc1_error_t error;
++    if (mMapper->valid()) {
++        const uint64_t usage =
++            static_cast<uint64_t>(android_convertGralloc1To0Usage(
++                        producerUsage, consumerUsage));
++        error = static_cast<gralloc1_error_t>(mMapper->lock(handle,
++                usage, asGralloc2Rect(bounds), fenceFd, vaddr));
++    } else {
++        gralloc1_rect_t accessRegion = asGralloc1Rect(bounds);
++        sp<Fence> fence = new Fence(fenceFd);
++        error = mDevice->lock(handle,
++                static_cast<gralloc1_producer_usage_t>(producerUsage),
++                static_cast<gralloc1_consumer_usage_t>(consumerUsage),
++                &accessRegion, vaddr, fence);
++    }
+ 
+-    ALOGW_IF(error != Gralloc2::Error::NONE, "lock(%p, ...) failed: %d",
+-            handle, error);
++    ALOGW_IF(error != GRALLOC1_ERROR_NONE, "lock(%p, ...) failed: %d", handle,
++            error);
+ 
+-    return static_cast<status_t>(error);
++    return error;
+ }
+ 
+ static inline bool isValidYCbCrPlane(const android_flex_plane_t& plane) {
+@@ -157,28 +241,160 @@ status_t GraphicBufferMapper::lockAsyncYCbCr(buffer_handle_t handle,
+ {
+     ATRACE_CALL();
+ 
+-    Gralloc2::YCbCrLayout layout;
+-    Gralloc2::Error error = mMapper->lock(handle, usage,
+-            asGralloc2Rect(bounds), fenceFd, &layout);
+-    if (error == Gralloc2::Error::NONE) {
+-        ycbcr->y = layout.y;
+-        ycbcr->cb = layout.cb;
+-        ycbcr->cr = layout.cr;
+-        ycbcr->ystride = static_cast<size_t>(layout.yStride);
+-        ycbcr->cstride = static_cast<size_t>(layout.cStride);
+-        ycbcr->chroma_step = static_cast<size_t>(layout.chromaStep);
++    gralloc1_rect_t accessRegion = asGralloc1Rect(bounds);
++
++    std::vector<android_flex_plane_t> planes;
++    android_flex_layout_t flexLayout{};
++    gralloc1_error_t error;
++
++    if (mMapper->valid()) {
++        Gralloc2::YCbCrLayout layout;
++        error = static_cast<gralloc1_error_t>(mMapper->lock(handle, usage,
++                asGralloc2Rect(bounds), fenceFd, &layout));
++        if (error == GRALLOC1_ERROR_NONE) {
++            ycbcr->y = layout.y;
++            ycbcr->cb = layout.cb;
++            ycbcr->cr = layout.cr;
++            ycbcr->ystride = static_cast<size_t>(layout.yStride);
++            ycbcr->cstride = static_cast<size_t>(layout.cStride);
++            ycbcr->chroma_step = static_cast<size_t>(layout.chromaStep);
++        }
++
++        return error;
++    } else {
++        sp<Fence> fence = new Fence(fenceFd);
++
++        if (mDevice->hasCapability(GRALLOC1_CAPABILITY_ON_ADAPTER)) {
++            error = mDevice->lockYCbCr(handle,
++                    static_cast<gralloc1_producer_usage_t>(usage),
++                    static_cast<gralloc1_consumer_usage_t>(usage),
++                    &accessRegion, ycbcr, fence);
++            ALOGW_IF(error != GRALLOC1_ERROR_NONE,
++                    "lockYCbCr(%p, ...) failed: %d", handle, error);
++            return error;
++        }
++
++        uint32_t numPlanes = 0;
++        error = mDevice->getNumFlexPlanes(handle, &numPlanes);
++
++        if (error != GRALLOC1_ERROR_NONE) {
++            ALOGV("Failed to retrieve number of flex planes: %d", error);
++            return error;
++        }
++        if (numPlanes < 3) {
++            ALOGV("Not enough planes for YCbCr (%u found)", numPlanes);
++            return GRALLOC1_ERROR_UNSUPPORTED;
++        }
++
++        planes.resize(numPlanes);
++        flexLayout.num_planes = numPlanes;
++        flexLayout.planes = planes.data();
++
++        error = mDevice->lockFlex(handle,
++                static_cast<gralloc1_producer_usage_t>(usage),
++                static_cast<gralloc1_consumer_usage_t>(usage),
++                &accessRegion, &flexLayout, fence);
+     }
+ 
+-    return static_cast<status_t>(error);
++    if (error != GRALLOC1_ERROR_NONE) {
++        ALOGW("lockFlex(%p, ...) failed: %d", handle, error);
++        return error;
++    }
++    if (flexLayout.format != FLEX_FORMAT_YCbCr) {
++        ALOGV("Unable to convert flex-format buffer to YCbCr");
++        unlock(handle);
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++
++    // Find planes
++    auto yPlane = planes.cend();
++    auto cbPlane = planes.cend();
++    auto crPlane = planes.cend();
++    for (auto planeIter = planes.cbegin(); planeIter != planes.cend();
++            ++planeIter) {
++        if (planeIter->component == FLEX_COMPONENT_Y) {
++            yPlane = planeIter;
++        } else if (planeIter->component == FLEX_COMPONENT_Cb) {
++            cbPlane = planeIter;
++        } else if (planeIter->component == FLEX_COMPONENT_Cr) {
++            crPlane = planeIter;
++        }
++    }
++    if (yPlane == planes.cend()) {
++        ALOGV("Unable to find Y plane");
++        unlock(handle);
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++    if (cbPlane == planes.cend()) {
++        ALOGV("Unable to find Cb plane");
++        unlock(handle);
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++    if (crPlane == planes.cend()) {
++        ALOGV("Unable to find Cr plane");
++        unlock(handle);
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++
++    // Validate planes
++    if (!isValidYCbCrPlane(*yPlane)) {
++        ALOGV("Y plane is invalid");
++        unlock(handle);
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++    if (!isValidYCbCrPlane(*cbPlane)) {
++        ALOGV("Cb plane is invalid");
++        unlock(handle);
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++    if (!isValidYCbCrPlane(*crPlane)) {
++        ALOGV("Cr plane is invalid");
++        unlock(handle);
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++    if (cbPlane->v_increment != crPlane->v_increment) {
++        ALOGV("Cb and Cr planes have different step (%d vs. %d)",
++                cbPlane->v_increment, crPlane->v_increment);
++        unlock(handle);
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++    if (cbPlane->h_increment != crPlane->h_increment) {
++        ALOGV("Cb and Cr planes have different stride (%d vs. %d)",
++                cbPlane->h_increment, crPlane->h_increment);
++        unlock(handle);
++        return GRALLOC1_ERROR_UNSUPPORTED;
++    }
++
++    // Pack plane data into android_ycbcr struct
++    ycbcr->y = yPlane->top_left;
++    ycbcr->cb = cbPlane->top_left;
++    ycbcr->cr = crPlane->top_left;
++    ycbcr->ystride = static_cast<size_t>(yPlane->v_increment);
++    ycbcr->cstride = static_cast<size_t>(cbPlane->v_increment);
++    ycbcr->chroma_step = static_cast<size_t>(cbPlane->h_increment);
++
++    return error;
+ }
+ 
+ status_t GraphicBufferMapper::unlockAsync(buffer_handle_t handle, int *fenceFd)
+ {
+     ATRACE_CALL();
+ 
+-    *fenceFd = mMapper->unlock(handle);
+-
+-    return NO_ERROR;
++    gralloc1_error_t error;
++    if (mMapper->valid()) {
++        *fenceFd = mMapper->unlock(handle);
++        error = GRALLOC1_ERROR_NONE;
++    } else {
++        sp<Fence> fence = Fence::NO_FENCE;
++        error = mDevice->unlock(handle, &fence);
++        if (error != GRALLOC1_ERROR_NONE) {
++            ALOGE("unlock(%p) failed: %d", handle, error);
++            return error;
++        }
++
++        *fenceFd = fence->dup();
++    }
++    return error;
+ }
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/libs/ui/include/ui/Gralloc2.h b/libs/ui/include/ui/Gralloc2.h
+index 8aee16033..66c8188c0 100644
+--- a/libs/ui/include/ui/Gralloc2.h
++++ b/libs/ui/include/ui/Gralloc2.h
+@@ -42,6 +42,9 @@ class Mapper {
+ 
+     Mapper();
+ 
++    // this will be removed and Mapper will be always valid
++    bool valid() const { return (mMapper != nullptr); }
++
+     Error createDescriptor(
+             const IMapper::BufferDescriptorInfo& descriptorInfo,
+             BufferDescriptor* outDescriptor) const;
+@@ -82,6 +85,9 @@ class Allocator {
+     // time.
+     Allocator(const Mapper& mapper);
+ 
++    // this will be removed and Allocator will be always valid
++    bool valid() const { return (mAllocator != nullptr); }
++
+     std::string dumpDebugInfo() const;
+ 
+     /*
+diff --git a/libs/ui/include/ui/GraphicBufferAllocator.h b/libs/ui/include/ui/GraphicBufferAllocator.h
+index 14a865e16..e4c3aabfa 100644
+--- a/libs/ui/include/ui/GraphicBufferAllocator.h
++++ b/libs/ui/include/ui/GraphicBufferAllocator.h
+@@ -25,13 +25,14 @@
+ 
+ #include <cutils/native_handle.h>
+ 
+-#include <ui/PixelFormat.h>
+-
+ #include <utils/Errors.h>
+ #include <utils/KeyedVector.h>
+ #include <utils/Mutex.h>
+ #include <utils/Singleton.h>
+ 
++#include <ui/Gralloc1.h>
++#include <ui/PixelFormat.h>
++
+ namespace android {
+ 
+ namespace Gralloc2 {
+@@ -44,6 +45,25 @@ class String8;
+ class GraphicBufferAllocator : public Singleton<GraphicBufferAllocator>
+ {
+ public:
++    enum {
++        USAGE_SW_READ_NEVER     = GRALLOC1_CONSUMER_USAGE_CPU_READ_NEVER,
++        USAGE_SW_READ_RARELY    = GRALLOC1_CONSUMER_USAGE_CPU_READ,
++        USAGE_SW_READ_OFTEN     = GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN,
++        USAGE_SW_READ_MASK      = GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN,
++
++        USAGE_SW_WRITE_NEVER    = GRALLOC1_PRODUCER_USAGE_CPU_WRITE_NEVER,
++        USAGE_SW_WRITE_RARELY   = GRALLOC1_PRODUCER_USAGE_CPU_WRITE,
++        USAGE_SW_WRITE_OFTEN    = GRALLOC1_PRODUCER_USAGE_CPU_WRITE_OFTEN,
++        USAGE_SW_WRITE_MASK     = GRALLOC1_PRODUCER_USAGE_CPU_WRITE_OFTEN,
++
++        USAGE_SOFTWARE_MASK     = USAGE_SW_READ_MASK|USAGE_SW_WRITE_MASK,
++
++        USAGE_HW_TEXTURE        = GRALLOC1_CONSUMER_USAGE_GPU_TEXTURE,
++        USAGE_HW_RENDER         = GRALLOC1_PRODUCER_USAGE_GPU_RENDER_TARGET,
++        USAGE_HW_2D             = 0x00000400, // Deprecated
++        USAGE_HW_MASK           = 0x00071F00, // Deprecated
++    };
++
+     static inline GraphicBufferAllocator& get() { return getInstance(); }
+ 
+     status_t allocate(uint32_t w, uint32_t h, PixelFormat format,
+@@ -77,6 +97,9 @@ class GraphicBufferAllocator : public Singleton<GraphicBufferAllocator>
+ 
+     GraphicBufferMapper& mMapper;
+     const std::unique_ptr<const Gralloc2::Allocator> mAllocator;
++
++    std::unique_ptr<Gralloc1::Loader> mLoader;
++    std::unique_ptr<Gralloc1::Device> mDevice;
+ };
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/libs/ui/include/ui/GraphicBufferMapper.h b/libs/ui/include/ui/GraphicBufferMapper.h
+index 06961b11b..dbdd704a2 100644
+--- a/libs/ui/include/ui/GraphicBufferMapper.h
++++ b/libs/ui/include/ui/GraphicBufferMapper.h
+@@ -22,6 +22,8 @@
+ 
+ #include <memory>
+ 
++#include <ui/Gralloc1.h>
++
+ #include <utils/Singleton.h>
+ 
+ 
+@@ -51,6 +53,9 @@ class GraphicBufferMapper : public Singleton<GraphicBufferMapper>
+     status_t importBuffer(buffer_handle_t rawHandle,
+             buffer_handle_t* outHandle);
+ 
++    // This is temporary and will be removed soon
++    status_t importBuffer(const GraphicBuffer* buffer);
++
+     status_t freeBuffer(buffer_handle_t handle);
+ 
+     status_t lock(buffer_handle_t handle,
+@@ -85,6 +90,9 @@ class GraphicBufferMapper : public Singleton<GraphicBufferMapper>
+     GraphicBufferMapper();
+ 
+     const std::unique_ptr<const Gralloc2::Mapper> mMapper;
++
++    std::unique_ptr<Gralloc1::Loader> mLoader;
++    std::unique_ptr<Gralloc1::Device> mDevice;
+ };
+ 
+ // ---------------------------------------------------------------------------

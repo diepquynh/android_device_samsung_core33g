@@ -1,0 +1,27 @@
+From 558e6193fbfdbfc4908c024f41c03041cdfc14e8 Mon Sep 17 00:00:00 2001
+From: Remilia Scarlet <remilia.1505@gmail.com>
+Date: Sat, 16 Jun 2018 16:40:47 +0000
+Subject: [PATCH] gralloc1: HACK
+
+Change-Id: I6526ac6503374cc472cf5f37d71f9ce0dc9fde92
+Signed-off-by: Remilia Scarlet <remilia.1505@gmail.com>
+---
+ include/hardware/gralloc1.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/hardware/gralloc1.h b/include/hardware/gralloc1.h
+index 0a6843f..0e0f98f 100644
+--- a/include/hardware/gralloc1.h
++++ b/include/hardware/gralloc1.h
+@@ -155,7 +155,7 @@ typedef enum {
+     GRALLOC1_FUNCTION_UNLOCK = 20,
+     GRALLOC1_FUNCTION_SET_LAYER_COUNT = 21,
+     GRALLOC1_FUNCTION_GET_LAYER_COUNT = 22,
+-    GRALLOC1_LAST_FUNCTION = 22,
++    GRALLOC1_LAST_FUNCTION = 23,
+ } gralloc1_function_descriptor_t;
+ 
+ typedef enum {
+-- 
+2.7.4
+

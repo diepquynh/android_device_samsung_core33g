@@ -1,0 +1,39 @@
+From 04ae2b452b8f926dd5449dc2a8f1c2c0e514443e Mon Sep 17 00:00:00 2001
+From: Remilia Scarlet <remilia.1505@gmail.com>
+Date: Sat, 16 Jun 2018 16:15:03 +0000
+Subject: [PATCH 1/2] adb: Force disable authorization
+
+Change-Id: I59235f32b59178991801dfdc56eccd5b9e1205fd
+Signed-off-by: Remilia Scarlet <remilia.1505@gmail.com>
+---
+ adb/daemon/main.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/adb/daemon/main.cpp b/adb/daemon/main.cpp
+index ef22033..cd2e694 100644
+--- a/adb/daemon/main.cpp
++++ b/adb/daemon/main.cpp
+@@ -90,7 +90,7 @@ static bool should_drop_privileges() {
+ 
+     return drop;
+ #else
+-    return true; // "adb root" not allowed, always drop privileges.
++    return false; // "adb root" not allowed, always drop privileges.
+ #endif // ALLOW_ADBD_ROOT
+ }
+ 
+@@ -158,9 +158,9 @@ int adbd_main(int server_port) {
+     // descriptor will always be open.
+     adbd_cloexec_auth_socket();
+ 
+-    if (ALLOW_ADBD_NO_AUTH && !android::base::GetBoolProperty("ro.adb.secure", false)) {
++    //if (ALLOW_ADBD_NO_AUTH && !android::base::GetBoolProperty("ro.adb.secure", false)) {
+         auth_required = false;
+-    }
++    //}
+ 
+     adbd_auth_init();
+ 
+-- 
+2.7.4
+

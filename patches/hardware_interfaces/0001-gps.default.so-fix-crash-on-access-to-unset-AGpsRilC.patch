@@ -1,0 +1,105 @@
+From 67d4754b68f47daefb1b7941e9267d9b9bd99520 Mon Sep 17 00:00:00 2001
+From: Tobias Gunkel <hennymcc@yahoo.de>
+Date: Sat, 21 Oct 2017 21:22:25 +0200
+Subject: [PATCH] gps.default.so: fix crash on access to unset
+ AGpsRilCallbacks::request_refloc
+
+Since Android 8.0 the AGpsRilCallbacks::request_refloc callback is not
+initialized anymore. Before 8.0 the callback was initialized by
+frameworks/base/services/core/services/core/jni/com_android_server_location_GnssLocationProvider.cpp:
+
+    if (sAGpsRilInterface)
+        sAGpsRilInterface->init(&sAGpsRilCallbacks);
+
+In the new HIDL based
+frameworks/base/services/core/services/core/jni/com_android_server_location_GnssLocationProvider.cpp
+this initializing is missing (maybe by mistake as an AGnssRilCallback
+struct is defined but not used and every other service callbacks is
+initialized?).
+
+The gps.default.so blob does not check if request_refloc is null and
+hence crashes when it tries to execute the callback.
+
+This is a workaround defines a request_refloc callback to avoid those
+crashes.
+
+Stacktrace:
+F libc    : Fatal signal 11 (SIGSEGV), code 1, fault addr 0x4 in tid
+(Thread-4)
+F DEBUG   : *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***
+***
+F DEBUG   : pid: 24009, tid: 24218, name: Thread-4  >>> system_server
+<<<
+F DEBUG   : signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x4
+F DEBUG   : Cause: null pointer dereference
+F DEBUG   : backtrace:
+F DEBUG   :     #00 pc 0000e6f0  /system/lib/hw/gps.default.so
+(_Z33proxy__agps_ril_request_refloc_cbj+87)
+F DEBUG   :     #01 pc 0000d2d1  /system/lib/hw/gps.default.so
+(_ZN14MessageHandler21OnGpsExtensionMessageEiPKvj+220)
+F DEBUG   :     #02 pc 0001205d  /system/lib/hw/gps.default.so
+(_ZN8broadcom10GpsiClient25HandleGpsExtensionMessageERNS_18IpcIncomingMessageE+176)
+F DEBUG   :     #03 pc 0001562f  /system/lib/hw/gps.default.so
+(_ZN8broadcom20IpcPipeTransportBase8OnSelectEibbbPv+166)
+F DEBUG   :     #04 pc 00016315  /system/lib/hw/gps.default.so
+(_ZN8broadcom13SelectManager24PerformOneWaitAndProcessEv+608)
+F DEBUG   :     #05 pc 00010481  /system/lib/hw/gps.default.so
+(_ZN8broadcom15ipc_thread_procEPv+8)
+F DEBUG   :     #06 pc 0000ec7b
+/system/vendor/lib/hw/android.hardware.gnss@1.0-impl.so
+(_Z10threadFuncPv+6)
+F DEBUG   :     #07 pc 00047cbf  /system/lib/libc.so
+(_ZL15__pthread_startPv+22)
+F DEBUG   :     #08 pc 0001afdd  /system/lib/libc.so (__start_thread+32)
+
+Change-Id: Ib3d090c1099697a2bd53d9642675995afc2fc7d0
+---
+ gnss/1.0/default/Gnss.cpp | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/gnss/1.0/default/Gnss.cpp b/gnss/1.0/default/Gnss.cpp
+index cfcee24..10bc2d2 100644
+--- a/gnss/1.0/default/Gnss.cpp
++++ b/gnss/1.0/default/Gnss.cpp
+@@ -46,6 +46,25 @@ GpsCallbacks Gnss::sGnssCb = {
+     .gnss_sv_status_cb = gnssSvStatusCb,
+ };
+ 
++/*
++ * AGnssRilCallback implements the callback methods required by the AGnssRil
++ * interface.
++ */
++struct AGnssRilCallback : IAGnssRilCallback {
++    Return<void> requestSetIdCb(uint32_t setIdFlag) override;
++    Return<void> requestRefLocCb() override;
++};
++
++Return<void> AGnssRilCallback::requestSetIdCb(uint32_t setIdFlag) {
++    ALOGI("%s: called with setIdFlag=%d", __func__, setIdFlag);
++    return Void();
++}
++
++Return<void> AGnssRilCallback::requestRefLocCb() {
++    ALOGI("%s: called", __func__);
++    return Void();
++}
++
+ uint32_t Gnss::sCapabilitiesCached = 0;
+ uint16_t Gnss::sYearOfHwCached = 0;
+ 
+@@ -511,6 +530,12 @@ Return<sp<IAGnssRil>> Gnss::getExtensionAGnssRil()  {
+             ALOGE("%s GnssRil interface not implemented by GNSS HAL", __func__);
+         } else {
+             mGnssRil = new AGnssRil(agpsRilIface);
++            sp<IAGnssRilCallback> aGnssRilCb = new AGnssRilCallback();
++            if (mGnssRil != nullptr) {
++                mGnssRil->setCallback(aGnssRilCb);
++            } else {
++                ALOGE("Unable to initialize AGnss Ril interface\n");
++            }
+         }
+     }
+     return mGnssRil;
+-- 
+2.7.4
+
