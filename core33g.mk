@@ -51,6 +51,10 @@ PRODUCT_PACKAGES += \
 	init.core33g_base.rc \
 	ueventd.sc8830.rc
 
+# Sensors
+PRODUCT_PACKAGES += \
+	sensors.sc8830
+
 # WiFi
 $(call inherit-product, hardware/broadcom/wlan/bcmdhd/config/config-bcm.mk)
 

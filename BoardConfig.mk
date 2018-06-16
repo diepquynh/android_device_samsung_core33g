@@ -64,3 +64,6 @@ TARGET_OTA_ASSERT_DEVICE := SM-G360H,SM-G360HU,core33g,core33gdd,core33gdx
 
 # Graphics
 TARGET_USES_GRALLOC1 := true
+
+# Sensors
+TARGET_USES_SENSORS_WRAPPER := true
