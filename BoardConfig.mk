@@ -67,3 +67,7 @@ TARGET_OTA_ASSERT_DEVICE := SM-G360H,SM-G360HU,core33g,core33gdd,core33gdx
 
 # Sensors
 TARGET_USES_SENSORS_WRAPPER := true
+
+# Camera
+TARGET_LD_SHIM_LIBS += \
+	/system/vendor/lib/hw/camera.sc8830.so|libmemoryheapion.so
