@@ -44,13 +44,6 @@ PRODUCT_PROPERTY_OVERRIDES += \
 PRODUCT_COPY_FILES += \
 	$(LOCAL_PATH)/media/mediaserver.rc:$(TARGET_COPY_OUT_SYSTEM)/etc/init/mediaserver.rc
 
-# Rootdir files
-PRODUCT_PACKAGES += \
-	init.sc8830.rc \
-	init.sc8830.usb.rc \
-	init.core33g_base.rc \
-	ueventd.sc8830.rc
-
 # Sensors
 PRODUCT_PACKAGES += \
 	sensors.sc8830
