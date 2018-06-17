@@ -41,9 +41,6 @@ PRODUCT_PROPERTY_OVERRIDES += \
 	media.stagefright.legacyencoder=true \
 	media.stagefright.less-secure=true
 
-PRODUCT_COPY_FILES += \
-	$(LOCAL_PATH)/media/mediaserver.rc:$(TARGET_COPY_OUT_SYSTEM)/etc/init/mediaserver.rc
-
 # Sensors
 PRODUCT_PACKAGES += \
 	sensors.sc8830
