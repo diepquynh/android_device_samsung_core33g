@@ -1,0 +1,59 @@
+From 77ce978fc9fdaf1cabefba3685d53d3d615f895e Mon Sep 17 00:00:00 2001
+From: Remilia Scarlet <remilia.1505@gmail.com>
+Date: Mon, 18 Jun 2018 05:14:36 +0000
+Subject: [PATCH] ril: Force build on sprd targets
+
+Tho this is for Exynos btw
+
+Change-Id: If7bfb55135aeb53591ceac4b547c5ff60a13f350
+Signed-off-by: Remilia Scarlet <remilia.1505@gmail.com>
+---
+ ril/Android.mk        | 4 ++--
+ ril/libril/Android.mk | 8 ++++----
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/ril/Android.mk b/ril/Android.mk
+index 0b76b81..7eaa163 100644
+--- a/ril/Android.mk
++++ b/ril/Android.mk
+@@ -20,9 +20,9 @@ ifeq ($(BOARD_VENDOR),samsung)
+ 
+ # libril
+ ifeq ($(BOARD_PROVIDES_LIBRIL),true)
+-ifneq ($(filter m7450 mdm9x35 ss333 tss310 xmm6260 xmm6262 xmm6360 xmm7260,$(BOARD_MODEM_TYPE)),)
++#ifneq ($(filter m7450 mdm9x35 ss333 tss310 xmm6260 xmm6262 xmm6360 xmm7260,$(BOARD_MODEM_TYPE)),)
+ include $(RIL_PATH)/libril/Android.mk
+-endif
++#endif
+ endif
+ 
+ # ril client
+diff --git a/ril/libril/Android.mk b/ril/libril/Android.mk
+index eb23fd1..993849e 100644
+--- a/ril/libril/Android.mk
++++ b/ril/libril/Android.mk
+@@ -31,17 +31,17 @@ LOCAL_STATIC_LIBRARIES := \
+ 
+ LOCAL_CFLAGS += -Wno-unused-parameter
+ 
+-ifeq ($(SIM_COUNT), 2)
++#ifeq ($(SIM_COUNT), 2)
+     LOCAL_CFLAGS += -DANDROID_MULTI_SIM -DDSDA_RILD1
+     LOCAL_CFLAGS += -DANDROID_SIM_COUNT_2
+-endif
++#endif
+ 
+ ifneq ($(filter xmm6262 xmm6360,$(BOARD_MODEM_TYPE)),)
+ LOCAL_CFLAGS += -DMODEM_TYPE_XMM6262
+ endif
+-ifeq ($(BOARD_MODEM_TYPE),xmm6260)
++#ifeq ($(BOARD_MODEM_TYPE),xmm6260)
+ LOCAL_CFLAGS += -DMODEM_TYPE_XMM6260
+-endif
++#endif
+ ifneq ($(filter m7450 mdm9x35 ss333 tss310 xmm7260,$(BOARD_MODEM_TYPE)),)
+ LOCAL_CFLAGS += -DSAMSUNG_NEXT_GEN_MODEM
+ endif
+-- 
+2.7.4
+
