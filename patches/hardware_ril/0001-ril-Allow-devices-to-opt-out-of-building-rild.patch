@@ -1,0 +1,30 @@
+From e672ea76487f4ac699e0d15a42b95b1dca9a1fe0 Mon Sep 17 00:00:00 2001
+From: "Christopher R. Palmer" <crpalmer@gmail.com>
+Date: Mon, 23 Nov 2015 20:30:19 -0500
+Subject: [PATCH] ril: Allow devices to opt-out of building rild
+
+Change-Id: I0e986018dccb53fdcb695c85b54776889c2f8ddc
+---
+ rild/Android.mk | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/rild/Android.mk b/rild/Android.mk
+index 7ac505c..a171445 100644
+--- a/rild/Android.mk
++++ b/rild/Android.mk
+@@ -1,5 +1,7 @@
+ # Copyright 2006 The Android Open Source Project
+ 
++ifneq ($(BOARD_PROVIDES_RILD),true)
++
+ LOCAL_PATH:= $(call my-dir)
+ include $(CLEAR_VARS)
+ 
+@@ -31,3 +33,4 @@ LOCAL_INIT_RC := rild.rc
+ 
+ include $(BUILD_EXECUTABLE)
+ 
++endif # BOARD_PROVIDES_RILD
+-- 
+2.7.4
+
