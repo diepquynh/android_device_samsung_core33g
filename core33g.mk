@@ -41,6 +41,10 @@ PRODUCT_PROPERTY_OVERRIDES += \
 	media.stagefright.legacyencoder=true \
 	media.stagefright.less-secure=true
 
+# Camera
+PRODUCT_PACKAGES += \
+	camera.sc8830
+
 # Sensors
 PRODUCT_PACKAGES += \
 	sensors.sc8830

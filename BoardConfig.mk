@@ -51,6 +51,34 @@ WIFI_DRIVER_NVRAM_PATH := "/vendor/etc/wifi/nvram_net.txt"
 WIFI_BAND := 802_11_ABG
 BOARD_HAVE_SAMSUNG_WIFI := true
 
+# Camera
+###########################################
+TARGET_CAMERA_OPEN_SOURCE := true
+
+# select camera 2M,3M,5M,8M
+CAMERA_SUPPORT_SIZE := 5M
+FRONT_CAMERA_SUPPORT_SIZE := 2M
+TARGET_BOARD_NO_FRONT_SENSOR := false
+TARGET_BOARD_CAMERA_FLASH_CTRL := false
+
+#face detect
+TARGET_BOARD_CAMERA_FACE_DETECT := false
+
+#snesor interface
+TARGET_BOARD_BACK_CAMERA_INTERFACE := mipi
+TARGET_BOARD_FRONT_CAMERA_INTERFACE := mipi
+
+#select camera zsl cap mode
+TARGET_BOARD_CAMERA_CAPTURE_MODE := false
+
+#rotation capture
+TARGET_BOARD_CAMERA_ROTATION_CAPTURE := true
+
+#select mipi d-phy mode(none, phya, phyb, phyab)
+TARGET_BOARD_FRONT_CAMERA_MIPI := phyb
+TARGET_BOARD_BACK_CAMERA_MIPI := phyab
+##########################################
+
 # Kernel
 TARGET_KERNEL_CONFIG := cyanogen_core33g_defconfig
 TARGET_KERNEL_SOURCE := kernel/samsung/core33g
